@@ -453,6 +453,9 @@ fn dashboard_columns_follow_the_flow() {
     t.ok_at(None, T0, &["add", "CORE", "idea", "--state", "idea"]);
     t.ok_at(None, T0, &["add", "CORE", "old"]);
     t.ok_at(Some("gone"), T0 - 120 * MIN, &["claim", "CORE-1-05"]);
+    // A ready container is shown in Ready (where it was dragged), with why
+    // agents are not offered it.
+    t.ok_at(None, T0, &["add", "CORE", "epic", "--type", "feature"]);
     let (_server, port) = start_server(&t, &[]);
     let (_, v) = get(port, "/api/issues");
     let v: serde_json::Value = serde_json::from_str(&v).unwrap();
@@ -477,6 +480,25 @@ fn dashboard_columns_follow_the_flow() {
     assert_eq!(col("CORE-1-04"), ("backlog".to_string(), false));
     // A stale claim stays in progress, flagged.
     assert_eq!(col("CORE-1-05"), ("in_progress".to_string(), true));
+    assert_eq!(col("CORE-1-06"), ("ready".to_string(), false));
+    let epic = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "CORE-1-06")
+        .unwrap();
+    assert!(
+        epic["wait"].as_str().unwrap().contains("not offered"),
+        "{epic}"
+    );
+    // An offered task has no note.
+    let task = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "CORE-1-00")
+        .unwrap();
+    assert!(task["wait"].is_null(), "{task}");
 }
 
 /// A page on a configured local origin (the factory UI) can fetch the token,

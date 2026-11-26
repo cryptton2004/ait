@@ -242,6 +242,7 @@ function card(i) {
   else if (i.column === "done") meta = "done " + ago(i.done_at);
   else if (i.column === "released") meta = "released " + ago(i.released_at);
   else if (i.column === "backlog") meta = i.wait || i.state;
+  else if (i.column === "ready" && i.wait) meta = i.wait;
   else if (i.column === "in_review") meta = "in review" + (i.reason ? ": " + i.reason : "");
   if (i.agent && !FINISHED.includes(i.column)) meta = (meta ? meta + " · " : "") + "agent " + i.agent;
   if (meta) c.append(el("div", "m", meta));

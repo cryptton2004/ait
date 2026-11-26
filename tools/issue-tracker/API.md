@@ -172,7 +172,7 @@ policy (see below), and close the connection.
 `order`, `parent`, `agent`, `reason`, `done_at`, `released_at`, `column`
 (see board columns), `session`, `generation`, `lease_until` (claim, or
 null), `stale` (bool: claimed but the lease ran out), `wait` (string or
-null: why it is in `waiting`).
+null: why it is in `waiting`, why a backlog review has not started, or why a card in `ready` is not offered to agents).
 
 **Stats:** `{"since", "columns": {column: {"count", "avg_hours",
 "median_hours", "p90_hours", "now", "now_avg_hours", "now_max_hours"}},

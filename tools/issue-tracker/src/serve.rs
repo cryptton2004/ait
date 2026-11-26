@@ -539,6 +539,22 @@ fn run_args(base: &Env, args: Vec<String>) -> Result<Output> {
     crate::dispatch(&cmd, &conn, &env, &a)
 }
 
+/// Why a ready issue is not offered by `next`, for its card.
+fn ready_note(
+    c: &Connection,
+    env: &Env,
+    ap: &crate::approvals::Approvals,
+    id: &str,
+) -> Option<String> {
+    let first = claims::blockers(c, env, ap, id).ok()?.into_iter().next()?;
+    let msg = first["message"].as_str()?;
+    Some(if first["code"] == "TYPE" {
+        "not offered to agents: it is a container (done when its children are)".to_string()
+    } else {
+        format!("not offered: {msg}")
+    })
+}
+
 /// Ids returned by a one-column query.
 fn id_set(c: &Connection, sql: &str) -> Result<std::collections::HashSet<String>> {
     let mut st = c.prepare(sql)?;
@@ -597,6 +613,13 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
                         parent.as_deref().unwrap_or("its parent")
                     ));
                     "backlog"
+                }
+                // Ready but not offered to agents (a container, not
+                // approved for build, its tier at its WIP limit ...): it
+                // still shows in Ready, with the reason on the card.
+                "ready" => {
+                    wait = ready_note(c, env, &ap, &id);
+                    "ready"
                 }
                 _ => "backlog",
             };
