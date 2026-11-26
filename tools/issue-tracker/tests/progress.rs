@@ -865,3 +865,38 @@ fn releases_view_groups_features_by_release() {
         .collect();
     assert_eq!(unplanned, ["CORE-3-00"]);
 }
+
+/// `/api/events` streams a `change` event when the tracker changes, then
+/// ends after `max` seconds.
+#[test]
+fn event_stream_pushes_changes() {
+    let t = T::new("sse");
+    t.ok(None, &["add", "CORE", "first"]);
+    let (_server, port) = start_server(&t, &[]);
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(
+        format!("GET /api/events?max=4 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
+    )
+    .unwrap();
+    // Read until the hello arrives, then make a change.
+    let mut got = String::new();
+    let mut buf = [0u8; 4096];
+    let start = Instant::now();
+    while !got.contains("event: hello") {
+        assert!(start.elapsed() < Duration::from_secs(10), "no hello: {got}");
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "stream closed early: {got}");
+        got.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+    assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+    assert!(got.contains("text/event-stream"), "{got}");
+    t.ok(None, &["add", "CORE", "second"]);
+    // The rest of the stream (it ends by itself after max=4 seconds).
+    let mut rest = String::new();
+    s.read_to_string(&mut rest).unwrap();
+    got.push_str(&rest);
+    assert!(got.contains("event: change"), "{got}");
+    assert!(got.contains("id: 2\n"), "{got}");
+    assert!(got.contains("\"title\":\"second\""), "{got}");
+}

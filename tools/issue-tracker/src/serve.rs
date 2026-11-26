@@ -444,6 +444,82 @@ fn releases_view(c: &Connection, env: &Env) -> Result<Value> {
     Ok(json!({"releases": out, "unplanned": unplanned}))
 }
 
+/// Open event streams; each holds one thread, so there is a cap.
+static STREAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_STREAMS: usize = 32;
+
+struct StreamSlot;
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        STREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `GET /api/events`: Server-Sent Events. Sends `hello` with the current
+/// head, then a `change` event (id = head, data = head and the new events)
+/// whenever the tracker changes, checked every second, and a comment every
+/// 15 s to keep the connection open. It ends after `?max=` seconds (default
+/// and limit 600); browsers' EventSource reconnects on its own and resumes
+/// from `Last-Event-ID`.
+fn event_stream(
+    s: &mut TcpStream,
+    c: &Connection,
+    q: &str,
+    last_id: Option<i64>,
+) -> std::io::Result<()> {
+    use std::sync::atomic::Ordering;
+    if STREAMS.fetch_add(1, Ordering::SeqCst) >= MAX_STREAMS {
+        STREAMS.fetch_sub(1, Ordering::SeqCst);
+        return deny(
+            s,
+            "503 Service Unavailable",
+            "BUSY",
+            "too many open event streams",
+        );
+    }
+    let _slot = StreamSlot;
+    let max_s: u64 = query(q, "max")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600)
+        .clamp(1, 600);
+    let head_now = |c: &Connection| board::head(c).unwrap_or(0);
+    let mut last = last_id.unwrap_or_else(|| head_now(c));
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}Connection: close\r\n\r\nretry: 2000\n\nevent: hello\ndata: {}\n\n",
+        CORS.with(|x| x.borrow().clone()),
+        json!({"head": head_now(c), "api": API_VERSION})
+    );
+    s.write_all(head.as_bytes())?;
+    s.flush()?;
+    let start = std::time::Instant::now();
+    let mut quiet = 0u32;
+    while start.elapsed() < Duration::from_secs(max_s) {
+        let h = head_now(c);
+        if h > last {
+            let events = db::read(c, |c| board::activity_json(c, None, Some(last), None, 200))
+                .map(|v| v["events"].clone())
+                .unwrap_or(Value::Null);
+            let msg = format!(
+                "id: {h}\nevent: change\ndata: {}\n\n",
+                json!({"head": h, "events": events})
+            );
+            s.write_all(msg.as_bytes())?;
+            s.flush()?;
+            last = h;
+            quiet = 0;
+        } else {
+            quiet += 1;
+            if quiet >= 15 {
+                s.write_all(b": ping\n\n")?;
+                s.flush()?;
+                quiet = 0;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
 struct Request {
     method: String,
     target: String,
@@ -617,6 +693,12 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
         Err(e) => return json_resp(&mut s, "500 Internal Server Error", &e.to_json()),
     };
     let c = &conn;
+    if path == "/api/events" {
+        let last = req
+            .header("last-event-id")
+            .and_then(|v| v.trim().parse::<i64>().ok());
+        return event_stream(&mut s, c, q, last);
+    }
     let result: Result<Value> = match path {
         "/api/head" => board::head(c).map(|h| json!({"head": h})),
         "/api/version" => Ok(json!({
