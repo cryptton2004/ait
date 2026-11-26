@@ -198,14 +198,17 @@ Dropping a card on In progress claims it for you (session `dashboard`) with a le
 The header switches between three views (remembered per browser) and has a
 search box that filters the board and the list:
 
-- **Board:** the columns above.
+- **Board:** the columns above, with tasks, features and reviews. Milestones
+  and releases are not cards (nobody works on them; they finish with their
+  members): they are in the Roadmap panel and the Releases view.
 - **List:** every issue, dropped ones included, 50 at a time with Load more.
   Sort by any column, filter by state (or "open") and label, view, edit or
   delete a row, and tick rows to change priority, state, parent or labels for
   all of them at once.
 - **Releases:** each release with its expected date (overdue ones are
   flagged) and progress, and a table of its features and issues (id, title,
-  state, assignee), plus the features not in a release yet.
+  state, assignee), plus the features not in a release yet. Each open
+  release has a Ship button (same as `ait ship`).
 
 Checking a criterion asks for optional evidence; adding an issue warns about
 similar open titles with links to them.

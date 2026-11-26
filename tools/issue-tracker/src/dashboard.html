@@ -92,6 +92,7 @@ aside { display: grid; gap: 16px; align-content: start; min-width: 0; }
 #relview { display: grid; gap: 16px; min-width: 0; }
 #relview .rel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
 #relview .rel h2 { font-size: 15px; margin: 0; overflow-wrap: anywhere; }
+#relview .rel h2 button { font-size: 12px; margin-left: 8px; vertical-align: middle; }
 #relview .rel .meta { color: var(--muted); font-size: 13px; margin: 2px 0 8px; }
 #relview .rel .meta .late { color: var(--bad); font-weight: 600; }
 #relview table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -362,11 +363,15 @@ function releaseArgs(i) {
   const m = mine(i.id);
   return m ? ["release", i.id, "--gen", String(m.generation)] : ["release", i.id];
 }
+// Milestones and releases are containers: nobody works on them, they finish
+// with their members. They live in the Roadmap and Releases views, not on
+// the board.
+const onBoard = i => i.type !== "milestone" && i.type !== "release";
 function renderColumns() {
   const root = document.getElementById("columns");
   root.replaceChildren();
   for (const [key, label] of COLS) {
-    let items = issues.filter(i => i.column === key && (!searchIds || searchIds.has(i.id)));
+    let items = issues.filter(i => i.column === key && onBoard(i) && (!searchIds || searchIds.has(i.id)));
     if (key === "done") items = items.sort((a, b) => (b.done_at || "").localeCompare(a.done_at || "")).slice(0, 30);
     if (key === "released") items = items.sort((a, b) => (b.released_at || "").localeCompare(a.released_at || "")).slice(0, 30);
     const stale = items.filter(i => i.stale).length;
@@ -382,7 +387,7 @@ function renderColumns() {
     }
     const limit = wip[key];
     if (limit) {
-      const live = issues.filter(i => i.column === key && !i.stale).length;
+      const live = issues.filter(i => i.column === key && onBoard(i) && !i.stale).length;
       const n = el("span", "n" + (live >= limit ? " full" : ""), live + " / " + limit);
       n.title = "WIP limit (wip." + key + " in default.cfg); stale claims do not count";
       h.append(n);
@@ -1160,6 +1165,12 @@ async function renderReleases() {
     if (r.due && r.due < today && !FINISHED.includes(r.state) && r.state !== "dropped") meta.append(document.createTextNode(" "), el("span", "late", "overdue"));
     const live = r.items.filter(x => x.state !== "dropped").length, dropped = r.items.length - live;
     meta.append(document.createTextNode(" · " + live + " item" + (live === 1 ? "" : "s") + (dropped ? ", " + dropped + " dropped" : "")));
+    if (WRITABLE && !["released", "dropped"].includes(r.state)) {
+      const sb = el("button", null, "Ship");
+      sb.title = "Release it: same as `ait ship " + r.id + "`";
+      sb.addEventListener("click", e => { e.stopPropagation(); shipDialog(r); });
+      h.append(document.createTextNode(" "), sb);
+    }
     box.append(h, meta, relTable(r.items));
     root.append(box);
   }
@@ -1201,8 +1212,8 @@ async function refresh() {
   if (view === "releases") renderReleases();
   renderFeed(av.events);
   renderRoadmap(rv);
-  const count = col => issues.filter(i => i.column === col).length;
-  const stale = issues.filter(i => i.stale).length;
+  const count = col => issues.filter(i => i.column === col && onBoard(i)).length;
+  const stale = issues.filter(i => i.stale && onBoard(i)).length;
   document.getElementById("summary").textContent =
     count("ready") + " ready · " + count("waiting") + " waiting · " + count("in_progress") + " in progress" +
     (stale ? " (" + stale + " stale)" : "") + " · " + count("in_review") + " in review · " + count("done") + " done · " + count("released") + " released";
