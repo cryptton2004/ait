@@ -368,7 +368,8 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
             let limit = query(q, "limit")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(50_i64)
-                .clamp(1, 1000);
+                // "Load more" on the dashboard asks for ever larger pages.
+                .max(1);
             db::read(c, |c| board::activity_json(c, None, after, None, limit))
         }
         p if p.starts_with("/api/issue/") => {

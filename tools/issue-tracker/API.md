@@ -167,7 +167,7 @@ policy (see below), and close the connection.
 | `/api/board` | same as `ait board --json` |
 | `/api/roadmap` | same as `ait roadmap --json` |
 | `/api/stats?since=7d` | flow stats (`since` optional: `30m`, `12h`, `7d` ...) |
-| `/api/activity?after=SEQ&limit=N` | same as `ait activity --json` (`limit` 1..1000, default 50) |
+| `/api/activity?after=SEQ&limit=N` | same as `ait activity --json` (`limit` at least 1, default 50; the newest `limit` events) |
 
 **Board item** (`/api/issues`): `id`, `title`, `type`, `state`, `priority`,
 `order`, `parent`, `agent`, `reason`, `done_at`, `released_at`, `column`

@@ -157,7 +157,7 @@ const TYPES = ["task", "review", "feature", "milestone", "release"];
 const FINISHED = ["done", "released"];
 const PRIORITIES = ["P0", "P1", "P2", "P3", "P4"];
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
-let wip = {}, agentTiers = {}, head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
+let feedLimit = 40, wip = {}, agentTiers = {}, head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -363,7 +363,10 @@ function closeDetail() {
   selected = null;
   renderColumns();
 }
-function renderFeed(events) {
+// Asks for one event more than it shows: if that one exists, there is more.
+function renderFeed(all) {
+  const more = all.length > feedLimit;
+  const events = more ? all.slice(-feedLimit) : all;
   document.getElementById("feedcount").textContent = "(latest " + events.length + ")";
   const ul = document.getElementById("feed");
   ul.replaceChildren();
@@ -376,6 +379,19 @@ function renderFeed(events) {
     ul.append(li);
   }
   if (!events.length) ul.append(el("li", "w", "no activity yet"));
+  if (more) {
+    const b = el("button", null, "Load more");
+    b.addEventListener("click", async () => {
+      feedLimit += 40;
+      b.disabled = true;
+      const keep = ul.scrollTop;
+      try { renderFeed((await get("/api/activity?limit=" + (feedLimit + 1))).events); } catch (e) { b.disabled = false; }
+      ul.scrollTop = keep;
+    });
+    const li = el("li");
+    li.append(b);
+    ul.append(li);
+  }
 }
 function renderNext(v) {
   nextIds = (v.build || []).map(x => x.id);
@@ -849,7 +865,7 @@ function editForm(box, i) {
 // ---------------------------------------------------------------- refresh
 async function refresh() {
   const win = document.getElementById("statsWindow").value;
-  const [iv, av, rv, nv, sv] = await Promise.all([get("/api/issues"), get("/api/activity?limit=40"), get("/api/roadmap"), get("/api/next"), get("/api/stats" + (win ? "?since=" + win : ""))]);
+  const [iv, av, rv, nv, sv] = await Promise.all([get("/api/issues"), get("/api/activity?limit=" + (feedLimit + 1)), get("/api/roadmap"), get("/api/next"), get("/api/stats" + (win ? "?since=" + win : ""))]);
   renderStats(sv);
   issues = iv.issues;
   wip = iv.wip || {};
