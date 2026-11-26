@@ -105,6 +105,9 @@ pub struct Config {
     /// WIP limits: `in_progress`, `in_review` and `agent.<tier>`.
     pub wip: Vec<(String, i64)>,
     pub port: u16,
+    /// Local web origins (a factory UI) allowed to read and write through
+    /// the dashboard API, e.g. http://localhost:5173.
+    pub allowed_origins: Vec<String>,
     pub main_branch: String,
     pub trailer: String,
     /// The config file that was loaded, if any.
@@ -124,6 +127,7 @@ impl Default for Config {
             repo: None,
             agents: Vec::new(),
             wip: Vec::new(),
+            allowed_origins: Vec::new(),
             port: 7777,
             main_branch: "main".to_string(),
             trailer: "Issue-ID".to_string(),
@@ -261,6 +265,17 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config> {
                 cfg.agents.push((tier, v.to_string()));
             }
             "port" => cfg.port = v.parse().ok().ok_or_else(|| bad("port must be 0..65535"))?,
+            "allowed_origins" => {
+                cfg.allowed_origins.clear();
+                for o in v.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+                    if !local_origin(o) {
+                        return Err(bad(&format!(
+                            "allowed_origins takes local origins such as http://localhost:5173 (not '{o}')"
+                        )));
+                    }
+                    cfg.allowed_origins.push(o.to_ascii_lowercase());
+                }
+            }
             "main_branch" => {
                 if v.is_empty() || v.starts_with('-') {
                     return Err(bad("main_branch must be a branch name"));
@@ -284,6 +299,27 @@ pub fn valid_word(s: &str) -> bool {
     (1..=32).contains(&s.len())
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// `http(s)://localhost|127.0.0.1|[::1][:port]`, nothing else.
+pub fn local_origin(o: &str) -> bool {
+    let rest = o
+        .strip_prefix("http://")
+        .or_else(|| o.strip_prefix("https://"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && h != "[" && !p.contains(']') => (h, Some(p)),
+        _ => (rest, None),
+    };
+    let host_ok = matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1]"
+    );
+    let port_ok =
+        port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()));
+    host_ok && port_ok
 }
 
 impl Config {
@@ -375,6 +411,27 @@ mod tests {
         // nothing, so the shipped config leaves the key unset.
         assert_eq!(c.approvals, None);
         assert_eq!(c.model_for("deep"), Some("opus"));
+    }
+
+    #[test]
+    fn local_origins_only() {
+        for ok in [
+            "http://localhost:5173",
+            "http://127.0.0.1",
+            "https://[::1]:8443",
+        ] {
+            assert!(local_origin(ok), "{ok}");
+        }
+        for bad in [
+            "http://evil.example",
+            "http://localhost.evil.example",
+            "localhost:5173",
+            "http://127.0.0.1:99999x",
+            "file://localhost",
+            "http://localhost:",
+        ] {
+            assert!(!local_origin(bad), "{bad}");
+        }
     }
 
     #[test]

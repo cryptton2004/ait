@@ -462,3 +462,126 @@ fn dashboard_columns_follow_the_flow() {
     // A stale claim stays in progress, flagged.
     assert_eq!(col("CORE-1-05"), ("in_progress".to_string(), true));
 }
+
+/// A page on a configured local origin (the factory UI) can fetch the token,
+/// pass the CORS preflight and write through the same gates; any other
+/// origin is still refused.
+#[test]
+fn allowed_origin_can_write_through_the_same_gates() {
+    let t = T::new("serve_origins");
+    let cfg = t.write(
+        "default.cfg",
+        "allowed_origins = http://localhost:5173, http://127.0.0.1:3000\nbackup_keep = 0\n",
+    );
+    t.ok(None, &["add", "CORE", "first"]);
+    let (_server, port) = start_server(&t, &["--config", &p(&cfg)]);
+    let host = format!("Host: 127.0.0.1:{port}\r\n");
+    let ui = "Origin: http://localhost:5173\r\n";
+
+    // Version endpoint (no origin needed).
+    let (code, v) = get(port, "/api/version");
+    let v: serde_json::Value = serde_json::from_str(&v).unwrap();
+    assert_eq!(code, 200);
+    assert_eq!(v["api"], 1);
+    assert_eq!(v["writable"], true);
+    assert!(v["schema"].as_i64().unwrap() >= 4, "{v}");
+
+    // Preflight: allowed origin gets 204 and CORS headers, others 403.
+    let pre = |origin: &str| {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        s.write_all(
+            format!(
+                "OPTIONS /api/run HTTP/1.1\r\n{host}Origin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type, x-ait-token\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    };
+    let ok = pre("http://localhost:5173");
+    assert!(ok.starts_with("HTTP/1.1 204"), "{ok}");
+    assert!(
+        ok.contains("Access-Control-Allow-Origin: http://localhost:5173\r\n"),
+        "{ok}"
+    );
+    assert!(ok.contains("X-Ait-Token"), "{ok}");
+    let bad = pre("http://evil.example");
+    assert!(bad.starts_with("HTTP/1.1 403"), "{bad}");
+    assert!(!bad.contains("Access-Control-Allow-Origin"), "{bad}");
+
+    // The token is handed only to an allowed origin.
+    let token_req = |origin: &str| {
+        http(
+            port,
+            &format!("GET /api/token HTTP/1.1\r\n{host}{origin}\r\n"),
+        )
+    };
+    assert_eq!(token_req("").0, 403);
+    assert_eq!(token_req("Origin: http://localhost:5174\r\n").0, 403);
+    let (code, body) = token_req(ui);
+    assert_eq!(code, 200, "{body}");
+    let token = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(token, page_token(port));
+
+    // A write from the factory UI (browser says same-site) passes, and the
+    // CLI gates still apply to it.
+    let hdr = format!(
+        "Content-Type: application/json\r\nX-Ait-Token: {token}\r\n{ui}Sec-Fetch-Site: same-site\r\n"
+    );
+    let (code, v) = post(port, &hdr, &["add", "CORE", "from the factory"]);
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["result"]["issue"]["id"], "CORE-1-01");
+    let (code, v) = post(port, &hdr, &["add", "CORE", "bad", "--priority", "P9"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (400, Some("INVALID_INPUT"))
+    );
+    let (code, v) = post(port, &hdr, &["delete", "CORE-1-00"]);
+    assert_eq!((code, v["error"]["code"].as_str()), (400, Some("USAGE")));
+    // Without the token it is still refused.
+    let no_token = format!("Content-Type: application/json\r\n{ui}Sec-Fetch-Site: same-site\r\n");
+    assert_eq!(post(port, &no_token, &["add", "CORE", "x"]).0, 403);
+
+    // Other origins stay refused, even with the right token.
+    for origin in ["http://evil.example", "http://localhost:5174"] {
+        let evil = format!(
+            "Content-Type: application/json\r\nX-Ait-Token: {token}\r\nOrigin: {origin}\r\nSec-Fetch-Site: cross-site\r\n"
+        );
+        let (code, v) = post(port, &evil, &["add", "CORE", "x"]);
+        assert_eq!(
+            (code, v["error"]["code"].as_str()),
+            (403, Some("FORBIDDEN")),
+            "{origin}"
+        );
+    }
+    // A cross-site request without an Origin header is refused too.
+    let blind = format!(
+        "Content-Type: application/json\r\nX-Ait-Token: {token}\r\nSec-Fetch-Site: same-site\r\n"
+    );
+    assert_eq!(post(port, &blind, &["add", "CORE", "x"]).0, 403);
+}
+
+#[test]
+fn allowed_origins_must_be_local() {
+    let t = T::new("origins_cfg");
+    for bad in [
+        "https://example.com",
+        "http://localhost.evil.com",
+        "http://localhost:5173/path",
+        "*",
+        "file://",
+    ] {
+        let cfg = t.write("bad.cfg", &format!("allowed_origins = {bad}\n"));
+        let mut c = t.cmd(None, &[]);
+        c.args(["--config", &p(&cfg), "--json", "list"]);
+        let r = t.exec(c);
+        assert_eq!(r.code, 2, "{bad}: {}", r.stdout);
+        assert!(r.stdout.contains("CONFIG"), "{bad}: {}", r.stdout);
+    }
+}

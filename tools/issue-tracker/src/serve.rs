@@ -49,6 +49,14 @@ const FORBIDDEN_OPTS: &[&str] = &[
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 
+/// Version of the HTTP and `--json` contract described in API.md.
+pub const API_VERSION: i64 = 1;
+
+thread_local! {
+    /// CORS headers for the current request (one thread per request).
+    static CORS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
 struct Server {
     port: u16,
     token: String,
@@ -126,8 +134,9 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
 
 fn respond(s: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n{}Connection: close\r\n\r\n",
+        body.len(),
+        CORS.with(|c| c.borrow().clone())
     );
     s.write_all(head.as_bytes())?;
     s.write_all(body)?;
@@ -250,6 +259,41 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
         .target
         .split_once('?')
         .unwrap_or((req.target.as_str(), ""));
+    // A configured local origin (the factory UI) may call the API from its
+    // own page: answer with CORS headers for it, and only for it.
+    let origin = req.header("origin").map(str::to_ascii_lowercase);
+    let trusted = origin
+        .as_ref()
+        .filter(|o| base.cfg.allowed_origins.contains(o))
+        .cloned();
+    // Always reset, so no header can leak from an earlier request.
+    CORS.with(|c| {
+        *c.borrow_mut() = trusted.as_ref().map_or_else(String::new, |o| {
+            format!(
+                "Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: GET, POST\r\nAccess-Control-Allow-Headers: Content-Type, X-Ait-Token\r\nAccess-Control-Max-Age: 600\r\n"
+            )
+        });
+    });
+    if req.method == "OPTIONS" {
+        return if trusted.is_some() {
+            respond(&mut s, "204 No Content", "text/plain", b"")
+        } else {
+            deny(&mut s, "403 Forbidden", "FORBIDDEN", "origin not allowed")
+        };
+    }
+    if req.method == "GET" && path == "/api/token" {
+        // Gives the write token to an allowed origin's page; the browser
+        // lets only that origin read this response.
+        if trusted.is_none() || !srv.writable {
+            return deny(
+                &mut s,
+                "403 Forbidden",
+                "FORBIDDEN",
+                "the token is only given to an allowed_origins page of an editable dashboard",
+            );
+        }
+        return json_resp(&mut s, "200 OK", &json!({"token": srv.token}));
+    }
     if req.method == "POST" && path == "/api/run" {
         return run_write(&mut s, base, srv, &req);
     }
@@ -288,6 +332,12 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
     let c = &conn;
     let result: Result<Value> = match path {
         "/api/head" => board::head(c).map(|h| json!({"head": h})),
+        "/api/version" => Ok(json!({
+            "api": API_VERSION,
+            "ait": env!("CARGO_PKG_VERSION"),
+            "schema": db::schema_version(),
+            "writable": srv.writable,
+        })),
         "/api/board" => db::read(c, |c| board::board_json(c, &env, 50)),
         "/api/issues" => db::read(c, |c| issues_view(c, &env)),
         "/api/roadmap" => db::read(c, |c| crate::roadmap::roadmap_json(c, &env, false)),
@@ -372,11 +422,13 @@ fn run_write(s: &mut TcpStream, base: &Env, srv: &Server, req: &Request) -> std:
         );
     }
     let port = srv.port;
-    let origins = [
+    let mut origins = vec![
         format!("http://127.0.0.1:{port}"),
         format!("http://localhost:{port}"),
     ];
-    if let Some(o) = req.header("origin")
+    origins.extend(base.cfg.allowed_origins.iter().cloned());
+    let origin = req.header("origin").map(str::to_ascii_lowercase);
+    if let Some(o) = &origin
         && !origins.iter().any(|a| a == o)
     {
         return deny(
@@ -386,8 +438,14 @@ fn run_write(s: &mut TcpStream, base: &Env, srv: &Server, req: &Request) -> std:
             "cross-site request refused",
         );
     }
+    // The factory UI runs on another local port, so its browser reports
+    // same-site; that is fine for an origin the owner listed.
+    let from_allowed = origin
+        .as_ref()
+        .is_some_and(|o| base.cfg.allowed_origins.contains(o));
     if let Some(site) = req.header("sec-fetch-site")
         && site != "same-origin"
+        && !from_allowed
     {
         return deny(
             s,
