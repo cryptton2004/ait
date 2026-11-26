@@ -151,10 +151,10 @@ pub fn blockers(c: &Connection, env: &Env, ap: &Approvals, id: &str) -> Result<V
         };
         out.push(json!({"code": "STATE", "message": msg, "state": state}));
     }
-    if kind != "task" && kind != "review" {
+    if !crate::issues::WORK_TYPES.contains(&kind.as_str()) && kind != "review" {
         out.push(json!({
             "code": "TYPE",
-            "message": format!("it is a {kind}; next offers tasks and reviews (use next --type {kind})"),
+            "message": format!("it is a {kind}; next offers tasks, bugs and reviews (use next --type {kind})"),
         }));
     }
     if kind == "review"
@@ -391,7 +391,10 @@ pub fn candidates(c: &Connection, env: &Env, ap: &Approvals, p: &Pick) -> Result
     Ok(rows
         .into_iter()
         .filter(|(id, agent, prio, kind)| {
-            (p.frame || p.kind.is_some() || kind == "task" || kind == "review")
+            (p.frame
+                || p.kind.is_some()
+                || crate::issues::WORK_TYPES.contains(&kind.as_str())
+                || kind == "review")
                 && p.kind.as_deref().is_none_or(|k| k == kind)
                 && p.prefix.as_ref().is_none_or(|x| id.starts_with(x.as_str()))
                 && p.agent

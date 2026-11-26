@@ -360,6 +360,7 @@ pub fn import_str(c: &Connection, env: &Env, text: &str) -> Result<usize> {
 /// Default id prefixes for records that bring no id of their own.
 const DEFAULT_PREFIX_FOR: &[(&str, &str)] = &[
     ("task", "TASK"),
+    ("bug", "BUG"),
     ("feature", "FEAT"),
     ("milestone", "MS"),
     ("release", "REL"),

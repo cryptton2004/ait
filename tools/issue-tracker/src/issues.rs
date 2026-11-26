@@ -55,7 +55,9 @@ pub const LINK_KINDS: &[&str] = &["needs", "relates", "discovered_from"];
 /// Issue types. Releases and milestones can be the `release` of other issues.
 /// `review` issues are checks (code, security, legal...) on their parent:
 /// they start only while the parent is `in_review`.
-pub const TYPES: &[&str] = &["task", "feature", "milestone", "release", "review"];
+pub const TYPES: &[&str] = &["task", "bug", "feature", "milestone", "release", "review"];
+/// Work items an agent builds and merges. A bug is a task with its own type.
+pub const WORK_TYPES: &[&str] = &["task", "bug"];
 pub const PRIORITIES: &[&str] = &["P0", "P1", "P2", "P3", "P4"];
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
@@ -1372,7 +1374,7 @@ pub fn show_json(c: &Connection, env: &Env, id: &str, note_limit: i64) -> Result
         [id],
         |r| r.get(0),
     )?;
-    let rollup = if s(&issue, "type") != "task" || has_members > 0 {
+    let rollup = if !WORK_TYPES.contains(&s(&issue, "type")) || has_members > 0 {
         roadmap::rollup(c, env, &approvals, id)?
     } else {
         Value::Null

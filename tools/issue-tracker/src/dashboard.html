@@ -60,7 +60,8 @@ main.withdetail { grid-template-columns: 1fr 380px; }
 .card .m { margin-top: 4px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .card .id .p { margin-left: 6px; color: var(--accent); }
 .card .id .p.P0, .card .id .p.P1 { color: var(--bad); font-weight: 600; }
-.card .ty { margin-left: 6px; font-size: 11px; text-transform: uppercase; color: var(--warn); }
+.card .ty, #listview .ty { margin-left: 6px; font-size: 11px; text-transform: uppercase; color: var(--warn); }
+.ty.bug { color: #fff !important; background: var(--bad); border-radius: 3px; padding: 0 4px; font-weight: 600; }
 .card .nx { margin-left: 6px; font-size: 11px; font-weight: 600; color: var(--ok); }
 .empty { color: var(--muted); font-size: 12px; padding: 4px; }
 aside { display: grid; gap: 16px; align-content: start; min-width: 0; }
@@ -194,11 +195,11 @@ const STATES = [
   ["in_review", "in_review: built, waiting for its reviews"]
 ];
 const NEEDS_REASON = ["blocked", "decision", "dropped"];
-const TYPES = ["task", "review", "feature", "milestone", "release"];
+const TYPES = ["task", "bug", "review", "feature", "milestone", "release"];
 const FINISHED = ["done", "released"];
 const PRIORITIES = ["P0", "P1", "P2", "P3", "P4"];
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
-let view = "board", searchIds = null, listState = { sort: "created", dir: "desc", state: "", label: "", limit: 50, picked: new Set() };
+let view = "board", searchIds = null, listState = { sort: "created", dir: "desc", state: "", type: "", label: "", limit: 50, picked: new Set() };
 let feedLimit = 40, wip = {}, agentTiers = {}, head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
 
 function el(tag, cls, text) {
@@ -296,7 +297,7 @@ function card(i) {
   c.dataset.id = i.id;
   const idl = el("div", "id", i.id);
   if (i.priority && i.priority !== "P2") idl.append(el("span", "p " + i.priority, i.priority));
-  if (i.type && i.type !== "task") idl.append(el("span", "ty", i.type));
+  if (i.type && i.type !== "task") idl.append(el("span", "ty" + (i.type === "bug" ? " bug" : ""), i.type));
   const pos = nextIds.indexOf(i.id);
   if (pos === 0) idl.append(el("span", "nx", "NEXT"));
   else if (pos > 0) idl.append(el("span", "nx", "#" + (pos + 1)));
@@ -968,6 +969,7 @@ function listQuery() {
   const s = listState, p = new URLSearchParams();
   p.set("sort", s.sort); p.set("dir", s.dir); p.set("limit", String(s.limit + 1));
   if (s.state) p.set("state", s.state);
+  if (s.type) p.set("type", s.type);
   if (s.label) p.set("label", s.label);
   const q = document.getElementById("search").value.trim();
   if (q) p.set("q", q);
@@ -986,10 +988,13 @@ async function renderList() {
   const st = sel([["", "all states"], ["open", "open (not finished or dropped)"]].concat(["idea", "planned", "ready", "blocked", "decision", "in_review", "done", "released", "dropped"].map(x => [x, x])), s.state);
   st.setAttribute("aria-label", "state filter");
   st.addEventListener("change", () => { s.state = st.value; s.limit = 50; renderList(); });
+  const ty = sel([["", "all types"]].concat(TYPES.map(x => [x, x])), s.type);
+  ty.setAttribute("aria-label", "type filter");
+  ty.addEventListener("change", () => { s.type = ty.value; s.limit = 50; renderList(); });
   const lb = inp(s.label, "label");
   lb.setAttribute("aria-label", "label filter");
   lb.addEventListener("change", () => { s.label = lb.value.trim().toLowerCase(); s.limit = 50; renderList(); });
-  f.append(st, lb, el("span", "w", v.total + " issue" + (v.total === 1 ? "" : "s")));
+  f.append(st, ty, lb, el("span", "w", v.total + " issue" + (v.total === 1 ? "" : "s")));
   root.append(f);
   // Bulk changes on the picked rows
   for (const id of [...s.picked]) if (!rows.some(r => r.id === id)) s.picked.delete(id);
@@ -1028,6 +1033,7 @@ async function renderList() {
     }
     tr.append(el("td", "id", r.id), el("td", null, r.state));
     const tt = el("td", null, r.title);
+    if (r.type !== "task") tt.prepend(el("span", "ty" + (r.type === "bug" ? " bug" : ""), r.type), " ");
     if (r.labels.length) { const lw = el("div"); for (const l of r.labels) lw.append(el("span", "lbl", l)); tt.append(lw); }
     tr.append(tt);
     tr.append(el("td", null, r.priority), el("td", null, r.size || "–"));

@@ -80,7 +80,7 @@ Every command accepts `--json` (machine output), `--as <session>`,
 
 | Command | What it does |
 |---|---|
-| `add <PREFIX\|PREFIX-N\|ID> "title"` | New issue. With a bare prefix the id follows the hierarchy: a feature, milestone or release opens a new group (`CORE-2-00`); an issue with `--parent` takes the next number in its parent's group (`CORE-2-01`); any other issue takes the next number in the newest group that is not a feature's (or opens one). `CORE-2` picks the next number in group 2, `CORE-1-05` exactly that id. Options: `--body`/`--body-file` (Markdown), `--after ID` (next free number after it, placed after it in the order), `--state` (default `ready`), `--reason`, `--size`, `--spec`, `--parent`, `--legacy`, `--needs A,B` (or `A:in_review` to wait only until A reaches that state), `--discovered-from ID`, `--criteria "one per line"` (acceptance criteria), `--type task\|feature\|milestone\|release\|review` (default task; a review needs `--parent`), `--priority P0..P4` (default P2), `--agent <tier>`, `--effort low\|medium\|high\|xhigh\|max`, `--reviewer <name>`, `--release <release or milestone id>`, `--labels a,b` (lowercase words), `--due YYYY-MM-DD` (expected date; `--due ""` clears it). After adding, the reply lists open issues with a similar title (`possible_duplicates`) so you can drop a duplicate |
+| `add <PREFIX\|PREFIX-N\|ID> "title"` | New issue. With a bare prefix the id follows the hierarchy: a feature, milestone or release opens a new group (`CORE-2-00`); an issue with `--parent` takes the next number in its parent's group (`CORE-2-01`); any other issue takes the next number in the newest group that is not a feature's (or opens one). `CORE-2` picks the next number in group 2, `CORE-1-05` exactly that id. Options: `--body`/`--body-file` (Markdown), `--after ID` (next free number after it, placed after it in the order), `--state` (default `ready`), `--reason`, `--size`, `--spec`, `--parent`, `--legacy`, `--needs A,B` (or `A:in_review` to wait only until A reaches that state), `--discovered-from ID`, `--criteria "one per line"` (acceptance criteria), `--type task\|bug\|feature\|milestone\|release\|review` (default task; a bug works exactly like a task but is marked as a bug; a review needs `--parent`), `--priority P0..P4` (default P2), `--agent <tier>`, `--effort low\|medium\|high\|xhigh\|max`, `--reviewer <name>`, `--release <release or milestone id>`, `--labels a,b` (lowercase words), `--due YYYY-MM-DD` (expected date; `--due ""` clears it). After adding, the reply lists open issues with a similar title (`possible_duplicates`) so you can drop a duplicate |
 | `edit <ID>` | Change any field `add` takes. `--version N` refuses the change if someone else changed the issue first. A claimed issue can only be edited by its claimant (`--gen N`), or with `--force` |
 | `state <ID> <state> [--reason r]` | `idea`, `planned`, `ready`, `blocked`, `decision`, `dropped`, `in_review`. `blocked`, `decision` and `dropped` need a reason. `in_review` submits the work for review (all acceptance criteria checked, gives the claim back). Use `done` to close an issue and `ship` to release it. Finished work is only reopened with `--force`; a claimed issue only changes by its claimant or with `--force` |
 | `move <ID> --before/--after ID \| --top \| --bottom` | Change the order (the order is what `next` follows) |
@@ -91,7 +91,7 @@ Every command accepts `--json` (machine output), `--as <session>`,
 | `list` | `--state a,b`, `--prefix P`, `--ready`, `--claimed`, `--stale`, `--all` (include done and dropped), `--limit N`, `--type`, `--priority P0,P1`, `--agent tier`, `--parent ID`, `--release ID`, `--tree` (indented by parent) |
 | `ship <ID> [--ref r] [--force]` | Release a release, milestone or feature: every member must be done or dropped, and every done task merged into `main` (with the `Issue-ID` trailer, or in `git_baseline`) and, when `origin/main` exists, pushed. Marks the container and its done members `released`. `--force` skips the git checks |
 | `roadmap [--all]` | Releases, milestones and features, each with done/total, percent, in progress, the next offered member, open decisions and blocked members. A container's members are its children (`parent`) and everything whose `release` is it, recursively |
-| `next` | What would be offered, by priority then order (`--prefix`, `--limit`, `--agent`, `--priority`, `--type`; tasks only unless `--type` is given). `--claim` claims the top one. `--take-stale` also takes over expired claims. `--frame` offers `idea`/`planned` issues with a frame approval instead. `--explain ID` says why an issue isn't offered and names the approval cause (`FRAME_ONLY`, `EXPIRED`, `EXCLUDED`, `NOT_STARTED`, `NOT_APPROVED`, `NO_APPROVALS_FILE`) |
+| `next` | What would be offered, by priority then order (`--prefix`, `--limit`, `--agent`, `--priority`, `--type`; tasks and bugs (and reviews) unless `--type` is given). `--claim` claims the top one. `--take-stale` also takes over expired claims. `--frame` offers `idea`/`planned` issues with a frame approval instead. `--explain ID` says why an issue isn't offered and names the approval cause (`FRAME_ONLY`, `EXPIRED`, `EXCLUDED`, `NOT_STARTED`, `NOT_APPROVED`, `NO_APPROVALS_FILE`) |
 | `claim <ID> [--take] [--lease 2d]` | Claim one issue. `--take` takes over a claim whose lease expired, and returns the previous handoff. `--lease` gives this claim its own lease length (1m to 30d, for example for a decision that needs meetings); renewals keep that length. `next --claim` takes `--lease` too |
 | `heartbeat [<ID>]` | Renews your live leases. Any `ait` call by you renews them too, at most once a minute. An expired lease is not revived: claim the issue again |
 | `verify <ID> --gen N` | Succeeds only if you still hold generation N |
@@ -147,7 +147,7 @@ in review, done and released.
 `due` (`YYYY-MM-DD`, the expected date, mainly for releases). `parent`, `release`, `needs` and `relates`
 may name an id or any record's `legacy` value. A record's id is its `id`, else
 its `legacy` if that is a valid id, else the next free id under its type's
-prefix (`--prefix-for`, default `task=TASK,feature=FEAT,milestone=MS,release=REL`).
+prefix (`--prefix-for`, default `task=TASK,bug=BUG,feature=FEAT,milestone=MS,release=REL`).
 Unknown fields are refused, so a misspelt field is reported, not lost.
 
 **What changed in the inventory format since the first import** (all
@@ -159,7 +159,7 @@ optional; an older file still imports unchanged):
 | `due` | new: expected date `YYYY-MM-DD` |
 | `labels` | valid lowercase labels (a-z, 0-9, `-`, `_`) now also become real labels for filtering; the body still keeps a "Labels:" line |
 | `state` | also accepts `in_review` and `released` |
-| `type` | also accepts `review` (give it a `parent`: the issue it reviews) |
+| `type` | also accepts `review` (give it a `parent`: the issue it reviews) and `bug` (a task marked as a bug; default prefix `BUG`) |
 | `needs` | an entry may end in `:state` (for example `"CORE-1-00:in_review"`) to wait only until that state |
 
 To bring an existing inventory up to date, add these fields where you have

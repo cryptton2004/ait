@@ -41,7 +41,7 @@ Inputs accept a unique prefix of an id; outputs always use the full id.
 |---|---|---|
 | `id` | string | full id |
 | `title`, `body` | string | `body` is left out by `list` and `next` |
-| `type` | string | `task`, `feature`, `milestone`, `release`, `review` |
+| `type` | string | `task`, `bug`, `feature`, `milestone`, `release`, `review` (a `bug` behaves exactly like a `task`) |
 | `state` | string | see states below |
 | `priority` | string | `P0` (most urgent) .. `P4` |
 | `order` | int | rank inside a priority; lower comes first (`ait move`) |

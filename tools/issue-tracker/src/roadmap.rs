@@ -282,9 +282,9 @@ pub fn cmd_ship(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             problems.push(format!("{mid} is {st}, not done"));
         }
     }
-    // Only tasks carry merges; containers and reviews do not.
+    // Only tasks and bugs carry merges; containers and reviews do not.
     let tasks: std::collections::HashSet<String> = db::read(c, |c| {
-        let mut st = c.prepare("SELECT id FROM issues WHERE type = 'task'")?;
+        let mut st = c.prepare("SELECT id FROM issues WHERE type IN ('task', 'bug')")?;
         let ids = st
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;

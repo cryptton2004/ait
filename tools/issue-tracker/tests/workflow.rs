@@ -865,3 +865,46 @@ fn due_dates_are_validated_and_moves_recorded() {
     let v = t.ok(None, &["edit", "REL-1-00", "--due", ""]);
     assert!(v["issue"]["due"].is_null(), "{v}");
 }
+
+/// A bug is a task with its own type: offered by `next`, claimable,
+/// counted in its feature's progress, and filterable with `--type bug`.
+#[test]
+fn bugs_work_like_tasks() {
+    let t = T::new("bugs");
+    t.ok(None, &["add", "CORE", "Login", "--type", "feature"]);
+    let v = t.ok(
+        None,
+        &[
+            "add",
+            "CORE",
+            "Crash on empty password",
+            "--type",
+            "bug",
+            "--parent",
+            "CORE-1-00",
+        ],
+    );
+    assert_eq!(v["issue"]["type"], "bug");
+    assert_eq!(v["issue"]["id"], "CORE-1-01");
+    assert_eq!(t.ok(None, &["show", "CORE-1-01"])["rollup"], Value::Null);
+    assert_eq!(next_ids(&t), ["CORE-1-01"]);
+    let l = t.ok(None, &["list", "--type", "bug"]);
+    assert_eq!(l["count"], 1);
+    let c = t.ok(Some("a1"), &["next", "--claim"]);
+    assert_eq!(c["issue"]["id"], "CORE-1-01");
+    let generation = c["claim"]["generation"].as_i64().unwrap().to_string();
+    t.ok(
+        Some("a1"),
+        &[
+            "done",
+            "CORE-1-01",
+            "--summary",
+            "fixed",
+            "--gen",
+            &generation,
+        ],
+    );
+    let f = t.ok(None, &["show", "CORE-1-00"]);
+    assert_eq!(f["rollup"]["done"], 1, "{f}");
+    assert_eq!(f["rollup"]["percent"], 100, "{f}");
+}

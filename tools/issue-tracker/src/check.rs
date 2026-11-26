@@ -466,10 +466,10 @@ fn git_checks(c: &Connection, env: &Env, repo: Option<&Path>, p: &mut Vec<Value>
         }
     };
     let baseline = load_baseline(env, &repo, p)?;
-    // Only tasks are merged; containers and reviews have no merge of their own.
+    // Only tasks and bugs are merged; containers and reviews have no merge of their own.
     let states: HashMap<String, String> = strings(
         c,
-        "SELECT id, state FROM issues WHERE type = 'task' ORDER BY id",
+        "SELECT id, state FROM issues WHERE type IN ('task', 'bug') ORDER BY id",
     )?
     .into_iter()
     .filter_map(|r| Some((r[0].clone()?, r[1].clone().unwrap_or_default())))

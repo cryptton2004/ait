@@ -12,7 +12,7 @@ Planning
   add <PREFIX|PREFIX-N|ID> \"title\" [--body t|--body-file f] [--after ID] [--state s]
       [--reason r] [--size s] [--spec s] [--parent ID] [--legacy old-id]
       [--needs ID[:state],ID] [--discovered-from ID] [--criteria \"one per line\"]
-      [--type task|feature|milestone|release|review]
+      [--type task|bug|feature|milestone|release|review]
       [--priority P0..P4] [--agent tier] [--effort low..max] [--reviewer r]
       [--release ID] [--labels a,b] [--due YYYY-MM-DD]
   edit <ID> [same fields as add] [--version N] [--gen N] [--force]
