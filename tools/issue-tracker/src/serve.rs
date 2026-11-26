@@ -278,7 +278,11 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
         .into_iter()
         .filter(|r| {
             let row_labels = issues::label_list(&r.5);
-            (states.is_empty() || states.contains(&r.2))
+            // "open" = not finished and not dropped.
+            (states.is_empty()
+                || states.contains(&r.2)
+                || (states.iter().any(|x| x == "open")
+                    && !["done", "released", "dropped"].contains(&r.2.as_str())))
                 && (types.is_empty() || types.contains(&r.3))
                 && labels.iter().all(|l| row_labels.contains(l))
                 && search
@@ -747,7 +751,7 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
     )?;
     let mut st = c.prepare(
         "SELECT i.id, i.title, i.state, i.reason, i.ord, i.done_at, c.session, c.generation, c.lease_until,
-                i.type, i.priority, i.agent, i.parent, i.released_at
+                i.type, i.priority, i.agent, i.parent, i.released_at, i.labels
          FROM issues i LEFT JOIN claims c ON c.issue = i.id
          WHERE i.state <> 'dropped'
          ORDER BY i.priority, i.ord, i.id",
@@ -807,6 +811,7 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
                 "agent": r.get::<_, Option<String>>(11)?,
                 "parent": parent,
                 "released_at": crate::time::iso_opt(r.get::<_, Option<i64>>(13)?),
+                "labels": issues::label_list(&r.get::<_, String>(14)?),
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

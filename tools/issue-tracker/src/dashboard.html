@@ -18,6 +18,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
 header h1 { font-size: 17px; margin: 0; }
@@ -70,6 +71,27 @@ aside { display: grid; gap: 16px; align-content: start; min-width: 0; }
 #feed li { border-bottom: 1px solid var(--line); padding-bottom: 6px; overflow-wrap: anywhere; }
 .w { color: var(--muted); }
 #detail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; max-height: 40vh; overflow-y: auto; }
+.views { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.views button { border: 0; border-radius: 0; }
+.views button.on { background: var(--accent); color: #fff; }
+#search { width: 220px; }
+.lbl { display: inline-block; font-size: 11px; background: var(--chip); color: var(--muted); border-radius: 8px; padding: 0 6px; margin: 2px 4px 0 0; }
+#listview { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+#listview .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+#listview .filters select, #listview .filters input { width: auto; }
+#listview .tablewrap { overflow-x: auto; }
+#listview table { width: 100%; border-collapse: collapse; font-size: 13px; }
+#listview th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px; border-bottom: 1px solid var(--line); white-space: nowrap; cursor: pointer; user-select: none; }
+#listview th.nosort { cursor: default; }
+#listview td { padding: 6px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+#listview td.id { font: 12px ui-monospace, Consolas, monospace; white-space: nowrap; }
+#listview tr.sel td { background: var(--chip); }
+#listview .acts button { padding: 0 6px; margin-right: 4px; }
+#listview .pbar { width: 70px; height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 6px; }
+#listview .pbar span { display: block; height: 100%; background: var(--ok); }
+#bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px; margin-bottom: 8px; border: 1px solid var(--accent); border-radius: 6px; font-size: 13px; }
+#bulk select, #bulk input { width: auto; }
+.crit .ev { display: block; font-size: 12px; color: var(--muted); }
 .chip { display: inline-block; background: var(--chip); border-radius: 10px; padding: 1px 8px; font-size: 12px; margin: 2px 4px 2px 0; }
 #nextlist ol { margin: 0; padding-left: 22px; font-size: 13px; }
 #nextlist li { cursor: pointer; overflow-wrap: anywhere; margin-bottom: 3px; }
@@ -116,6 +138,8 @@ input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 
   <h1>ait board</h1>
   <span id="summary">loading…</span>
   <span id="nextup"></span>
+  <span class="views" role="tablist"><button id="vboard" class="on" type="button">Board</button><button id="vlist" type="button">List</button></span>
+  <input id="search" type="search" placeholder="Search id, title, description, labels" aria-label="search issues">
   <button id="newbtn" class="primary" hidden>+ New issue</button>
   <span id="live"></span>
 </header>
@@ -127,6 +151,7 @@ input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 
 </section>
 <main id="main">
   <section id="columns" aria-label="Board columns"></section>
+  <section id="listview" aria-label="All issues" hidden></section>
   <aside>
     <div class="panel" id="detail" hidden></div>
   </aside>
@@ -157,6 +182,7 @@ const TYPES = ["task", "review", "feature", "milestone", "release"];
 const FINISHED = ["done", "released"];
 const PRIORITIES = ["P0", "P1", "P2", "P3", "P4"];
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
+let view = "board", searchIds = null, listState = { sort: "created", dir: "desc", state: "", label: "", limit: 50, picked: new Set() };
 let feedLimit = 40, wip = {}, agentTiers = {}, head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
 
 function el(tag, cls, text) {
@@ -260,6 +286,7 @@ function card(i) {
   else if (pos > 0) idl.append(el("span", "nx", "#" + (pos + 1)));
   if (i.stale) idl.append(el("span", "st", "STALE"));
   c.append(idl, el("div", "t", i.title));
+  if ((i.labels || []).length) { const lw = el("div"); for (const l of i.labels) lw.append(el("span", "lbl", l)); c.append(lw); }
   let meta = "";
   if (i.column === "in_progress") meta = i.session + (i.stale ? " · lease ended " : " · lease ") + ago(i.lease_until);
   else if (i.column === "waiting") meta = i.wait || (i.state + (i.reason ? ": " + i.reason : ""));
@@ -324,7 +351,7 @@ function renderColumns() {
   const root = document.getElementById("columns");
   root.replaceChildren();
   for (const [key, label] of COLS) {
-    let items = issues.filter(i => i.column === key);
+    let items = issues.filter(i => i.column === key && (!searchIds || searchIds.has(i.id)));
     if (key === "done") items = items.sort((a, b) => (b.done_at || "").localeCompare(a.done_at || "")).slice(0, 30);
     if (key === "released") items = items.sort((a, b) => (b.released_at || "").localeCompare(a.released_at || "")).slice(0, 30);
     const stale = items.filter(i => i.stale).length;
@@ -694,6 +721,7 @@ function newDialog() {
     const ac = field(g, "Acceptance criteria", el("textarea"), true, "criteria");
     ac.placeholder = "one per line; all must be checked before review or done";
     ac.style.minHeight = "60px";
+    const lb = field(g, "Labels", inp("", "comma separated, e.g. ui, bug (optional)"), false, "labels");
     const bd = field(g, "Description", el("textarea"), true, "body");
     bd.placeholder = "Markdown";
     pf.focus();
@@ -707,10 +735,23 @@ function newDialog() {
       const a = ["add", pf.value.trim(), ti.value.trim(), "--type", ty.value, "--priority", pr.value, "--state", st.value];
       const opt = (name, v) => { if (v.trim()) a.push("--" + name, v.trim()); };
       opt("reason", rs.value); opt("parent", pa.value); opt("release", rl.value); opt("needs", nd.value);
-      opt("agent", ag.value); opt("effort", ef.value); opt("criteria", ac.value); opt("body", bd.value);
+      opt("agent", ag.value); opt("effort", ef.value); opt("criteria", ac.value); opt("labels", lb.value); opt("body", bd.value);
       return a;
     };
-  }, "Add issue", a => [a, "issue added", res => { if (res && res.issue) showDetail(res.issue.id); }]);
+  }, "Add issue", a => [a, "issue added", res => {
+    if (!res || !res.issue) return;
+    showDetail(res.issue.id);
+    const d = res.possible_duplicates || [];
+    if (d.length) {
+      const box = el("div");
+      for (const x of d) {
+        const b = el("button", null, x.id + " [" + x.state + "] " + x.title);
+        b.addEventListener("click", () => showDetail(x.id));
+        box.append(el("div", null), b);
+      }
+      toast(res.issue.id + " was added. It looks like these open issues; check it is not a duplicate:", true, box);
+    }
+  }]);
 }
 
 // ---------------------------------------------------------------- detail
@@ -762,8 +803,14 @@ async function showDetail(id) {
         cb.checked = x.done;
         cb.disabled = !WRITABLE;
         cb.title = x.done ? "checked by " + (x.done_by || "-") + " " + ago(x.done_at) : "not checked yet";
-        cb.addEventListener("change", () => act(["criteria", i.id, x.done ? "--uncheck" : "--check", String(x.n)], "criterion " + x.n + (x.done ? " unchecked" : " checked"), () => showDetail(i.id)));
-        li.append(cb, el("span", x.done ? "done" : null, x.text));
+        cb.addEventListener("change", () => {
+          if (x.done) { act(["criteria", i.id, "--uncheck", String(x.n)], "criterion " + x.n + " unchecked", () => showDetail(i.id)); return; }
+          cb.checked = false;
+          evidenceDialog(i, x);
+        });
+        const txt = el("span", x.done ? "done" : null, x.text);
+        if (x.evidence) txt.append(el("span", "ev", "evidence: " + x.evidence));
+        li.append(cb, txt);
         if (WRITABLE && !FINISHED.includes(i.state)) {
           const rm = el("button", "rm", "×");
           rm.title = "remove this criterion (ait criteria " + i.id + " --remove " + x.n + ")";
@@ -818,6 +865,7 @@ function editForm(box, i) {
     agent: field(g, "Agent", agentInput(i.agent || "")),
     effort: field(g, "Effort", sel(EFFORTS, i.effort || "")),
     reviewer: field(g, "Reviewer", inp(i.reviewer)),
+    labels: field(g, "Labels", inp((i.labels || []).join(", "), "comma separated")),
     parent: field(g, "Parent", inp(i.parent)),
     release: field(g, "Release", inp(i.release)),
     size: field(g, "Size", inp(i.size)),
@@ -839,8 +887,8 @@ function editForm(box, i) {
     // changed the issue since it was loaded (same as `ait edit --version`).
     const a = ["edit", i.id, "--version", String(i.version)];
     for (const [k, input] of Object.entries(f)) {
-      const before = i[k] === null || i[k] === undefined ? "" : String(i[k]);
-      const now = k === "body" ? input.value : input.value.trim();
+      const before = k === "labels" ? (i.labels || []).join(",") : i[k] === null || i[k] === undefined ? "" : String(i[k]);
+      const now = k === "body" ? input.value : k === "labels" ? normLabels(input.value) : input.value.trim();
       if (now !== before) a.push("--" + k, now);
     }
     if (a.length === 4) { showDetail(i.id); return; }
@@ -862,6 +910,196 @@ function editForm(box, i) {
   box.hidden = false;
 }
 
+function normLabels(v) {
+  return [...new Set(v.split(",").map(x => x.trim().toLowerCase()).filter(Boolean))].join(",");
+}
+// Checking a criterion asks how it was met (optional), as
+// `ait criteria ID --check N --evidence "..."`.
+function evidenceDialog(i, x) {
+  openDialog("Check criterion " + x.n + " of " + i.id, g => {
+    g.append(el("div", "full", x.text));
+    const ev = field(g, "Evidence", el("textarea"), true, "evidence");
+    ev.placeholder = "how it was met: a test, a commit, a screenshot link (optional)";
+    ev.style.minHeight = "60px";
+    ev.focus();
+    return () => {
+      const a = ["criteria", i.id, "--check", String(x.n)];
+      if (ev.value.trim()) a.push("--evidence", ev.value.trim());
+      const m = mine(i.id);
+      if (m) a.push("--gen", String(m.generation));
+      return a;
+    };
+  }, "Check", a => [a, "criterion " + x.n + " checked", () => showDetail(i.id)]);
+}
+
+// ---------------------------------------------------------------- list view
+const LIST_COLS = [["id", "Id"], ["state", "State"], ["title", "Title"], ["assignee", "Assignee"], ["created", "Created"], ["", "Progress"]];
+function listQuery() {
+  const s = listState, p = new URLSearchParams();
+  p.set("sort", s.sort); p.set("dir", s.dir); p.set("limit", String(s.limit + 1));
+  if (s.state) p.set("state", s.state);
+  if (s.label) p.set("label", s.label);
+  const q = document.getElementById("search").value.trim();
+  if (q) p.set("q", q);
+  return "/api/list?" + p.toString();
+}
+async function renderList() {
+  const root = document.getElementById("listview");
+  let v;
+  try { v = await get(listQuery()); } catch (e) { root.replaceChildren(el("div", "w", "could not load the list")); return; }
+  const s = listState;
+  const more = v.issues.length > s.limit;
+  const rows = more ? v.issues.slice(0, s.limit) : v.issues;
+  root.replaceChildren();
+  // Filters
+  const f = el("div", "filters");
+  const st = sel([["", "all states"], ["open", "open (not finished or dropped)"]].concat(["idea", "planned", "ready", "blocked", "decision", "in_review", "done", "released", "dropped"].map(x => [x, x])), s.state);
+  st.setAttribute("aria-label", "state filter");
+  st.addEventListener("change", () => { s.state = st.value; s.limit = 50; renderList(); });
+  const lb = inp(s.label, "label");
+  lb.setAttribute("aria-label", "label filter");
+  lb.addEventListener("change", () => { s.label = lb.value.trim().toLowerCase(); s.limit = 50; renderList(); });
+  f.append(st, lb, el("span", "w", v.total + " issue" + (v.total === 1 ? "" : "s")));
+  root.append(f);
+  // Bulk changes on the picked rows
+  for (const id of [...s.picked]) if (!rows.some(r => r.id === id)) s.picked.delete(id);
+  if (WRITABLE && s.picked.size) root.append(bulkBar());
+  const wrap = el("div", "tablewrap");
+  const t = el("table");
+  const hr = el("tr");
+  if (WRITABLE) {
+    const th = el("th", "nosort");
+    const all = el("input");
+    all.type = "checkbox";
+    all.setAttribute("aria-label", "select all shown");
+    all.checked = rows.length > 0 && rows.every(r => s.picked.has(r.id));
+    all.addEventListener("change", () => { for (const r of rows) all.checked ? s.picked.add(r.id) : s.picked.delete(r.id); renderList(); });
+    th.append(all);
+    hr.append(th);
+  }
+  for (const [key, label] of LIST_COLS) {
+    const th = el("th", key ? null : "nosort", label + (key && s.sort === key ? (s.dir === "asc" ? " ▲" : " ▼") : ""));
+    if (key) th.addEventListener("click", () => { if (s.sort === key) s.dir = s.dir === "asc" ? "desc" : "asc"; else { s.sort = key; s.dir = key === "created" ? "desc" : "asc"; } renderList(); });
+    hr.append(th);
+  }
+  hr.append(el("th", "nosort", ""));
+  t.append(hr);
+  for (const r of rows) {
+    const tr = el("tr", s.picked.has(r.id) ? "sel" : null);
+    if (WRITABLE) {
+      const td = el("td");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.setAttribute("aria-label", "select " + r.id);
+      cb.checked = s.picked.has(r.id);
+      cb.addEventListener("change", () => { cb.checked ? s.picked.add(r.id) : s.picked.delete(r.id); renderList(); });
+      td.append(cb);
+      tr.append(td);
+    }
+    tr.append(el("td", "id", r.id), el("td", null, r.state));
+    const tt = el("td", null, r.title);
+    if (r.labels.length) { const lw = el("div"); for (const l of r.labels) lw.append(el("span", "lbl", l)); tt.append(lw); }
+    tr.append(tt);
+    tr.append(el("td", null, r.assignee ? r.assignee + (r.claim_status === "stale" ? " (stale)" : "") : "–"));
+    const cr = el("td", null, new Date(r.created_at).toLocaleDateString());
+    cr.title = r.created_at;
+    tr.append(cr);
+    const pc = el("td");
+    const bar = el("span", "pbar");
+    const fill = el("span");
+    fill.style.width = Math.max(0, Math.min(100, r.percent)) + "%";
+    bar.append(fill);
+    pc.append(bar, document.createTextNode(r.percent + "%"));
+    tr.append(pc);
+    const acts = el("td", "acts");
+    const ab = (label, title, fn, cls) => { const b = el("button", cls || null, label); b.title = title; b.setAttribute("aria-label", title + " " + r.id); b.addEventListener("click", fn); acts.append(b); };
+    ab("👁", "view", () => showDetail(r.id));
+    if (WRITABLE) {
+      ab("✎", "edit", async () => { await showDetail(r.id); const b = [...document.querySelectorAll("#detail button")].find(x => x.textContent === "Edit"); if (b) b.click(); });
+      ab("🗑", "delete", () => deleteDialog(r), "danger");
+    }
+    tr.append(acts);
+    t.append(tr);
+  }
+  if (!rows.length) { const tr = el("tr"); const td = el("td", "w", "no issues match"); td.colSpan = 9; tr.append(td); t.append(tr); }
+  wrap.append(t);
+  root.append(wrap);
+  if (more) {
+    const b = el("button", null, "Load more");
+    b.addEventListener("click", () => { s.limit += 50; renderList(); });
+    root.append(b);
+  }
+}
+function deleteDialog(r) {
+  openDialog("Delete " + r.id + "?", g => {
+    g.append(el("div", "full", r.title), el("div", "full w", "Same as `ait delete`: refused if it is claimed or other issues need it (the refusal offers --force). The id is retired and never reused. To keep it on record, set its state to dropped instead."));
+    return () => ["delete", r.id];
+  }, "Delete", a => [a, r.id + " deleted", () => { listState.picked.delete(r.id); if (selected === r.id) closeDetail(); renderList(); }]);
+}
+// Bulk changes run one `ait edit` / `ait state` per issue, with the same
+// checks; refusals are listed, the rest still apply.
+function bulkBar() {
+  const s = listState;
+  const bar = el("div");
+  bar.id = "bulk";
+  const what = sel([["priority", "set priority"], ["state", "set state"], ["parent", "set parent"], ["labels", "set labels"]], "priority");
+  const pr = sel(PRIORITIES, "P2");
+  const stt = sel(STATES.map(x => x[0]), "planned");
+  const rs = inp("", "reason (blocked, decision, dropped)");
+  const pa = inp("", "parent id (empty clears)");
+  const lb = inp("", "labels, comma separated");
+  const show = () => { pr.hidden = what.value !== "priority"; stt.hidden = rs.hidden = what.value !== "state"; pa.hidden = what.value !== "parent"; lb.hidden = what.value !== "labels"; };
+  what.addEventListener("change", show);
+  show();
+  const go = el("button", "primary", "Apply to " + s.picked.size);
+  go.addEventListener("click", async () => {
+    const ids = [...s.picked];
+    if (what.value === "state" && NEEDS_REASON.includes(stt.value) && !rs.value.trim()) { bad(rs, "A reason is required for " + stt.value + "."); return; }
+    go.disabled = true;
+    const failed = [];
+    for (const id of ids) {
+      let a;
+      if (what.value === "priority") a = ["edit", id, "--priority", pr.value];
+      else if (what.value === "parent") a = ["edit", id, "--parent", pa.value.trim()];
+      else if (what.value === "labels") a = ["edit", id, "--labels", lb.value];
+      else { a = ["state", id, stt.value]; if (rs.value.trim()) a.push("--reason", rs.value.trim()); }
+      try { await run(a); } catch (e) { failed.push(id + ": " + e.message); }
+    }
+    await refresh();
+    if (failed.length) toast((ids.length - failed.length) + " of " + ids.length + " changed. Refused:\n" + failed.join("\n"), true);
+    else { toast(ids.length + " issues changed", false); s.picked.clear(); }
+    renderList();
+  });
+  const clear = el("button", null, "Clear selection");
+  clear.addEventListener("click", () => { s.picked.clear(); renderList(); });
+  bar.append(el("b", null, s.picked.size + " selected"), what, pr, stt, rs, pa, lb, go, clear);
+  return bar;
+}
+function setView(v) {
+  view = v;
+  document.getElementById("vboard").classList.toggle("on", v === "board");
+  document.getElementById("vlist").classList.toggle("on", v === "list");
+  document.getElementById("columns").hidden = v !== "board";
+  document.getElementById("listview").hidden = v !== "list";
+  try { localStorage.setItem("ait-view", v); } catch (e) { /* private mode */ }
+  if (v === "list") renderList();
+}
+// Search filters the board's cards and the list (id, title, description,
+// labels: every word must match).
+let searchTimer = null;
+async function applySearch() {
+  const q = document.getElementById("search").value.trim();
+  if (!q) searchIds = null;
+  else {
+    try {
+      const v = await get("/api/list?limit=100000&q=" + encodeURIComponent(q));
+      searchIds = new Set(v.issues.map(x => x.id));
+    } catch (e) { searchIds = null; }
+  }
+  renderColumns();
+  if (view === "list") { listState.limit = 50; renderList(); }
+}
+
 // ---------------------------------------------------------------- refresh
 async function refresh() {
   const win = document.getElementById("statsWindow").value;
@@ -871,7 +1109,11 @@ async function refresh() {
   wip = iv.wip || {};
   agentTiers = iv.agent_tiers || {};
   renderNext(nv);
+  if (searchIds && document.getElementById("search").value.trim()) {
+    try { searchIds = new Set((await get("/api/list?limit=100000&q=" + encodeURIComponent(document.getElementById("search").value.trim()))).issues.map(x => x.id)); } catch (e) { /* keep the last result */ }
+  }
   renderColumns();
+  if (view === "list" && !document.getElementById("listview").contains(document.activeElement)) renderList();
   renderFeed(av.events);
   renderRoadmap(rv);
   const count = col => issues.filter(i => i.column === col).length;
@@ -899,6 +1141,10 @@ async function poll() {
   setTimeout(poll, 1500);
 }
 document.getElementById("statsWindow").addEventListener("change", () => refresh());
+document.getElementById("vboard").addEventListener("click", () => setView("board"));
+document.getElementById("vlist").addEventListener("click", () => setView("list"));
+document.getElementById("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(applySearch, 250); });
+try { if (localStorage.getItem("ait-view") === "list") setView("list"); } catch (e) { /* private mode */ }
 if (WRITABLE) {
   const nb = document.getElementById("newbtn");
   nb.hidden = false;

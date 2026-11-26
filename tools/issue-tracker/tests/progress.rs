@@ -759,6 +759,7 @@ fn list_view_shows_everything_with_filters_and_paging() {
     assert_eq!(by("CORE-2-00")["assignee"], "a1");
     assert_eq!(by("CORE-1-01")["labels"], serde_json::json!(["ui"]));
     assert_eq!(ids(&list("?state=dropped")), ["CORE-2-01"]);
+    assert_eq!(ids(&list("?state=open")), ["CORE-2-00"]);
     assert_eq!(ids(&list("?label=ui")), ["CORE-1-01"]);
     assert_eq!(ids(&list("?q=postgres%20INDEX")), ["CORE-2-00"]);
     assert_eq!(ids(&list("?q=login+form")), ["CORE-1-01"]);
