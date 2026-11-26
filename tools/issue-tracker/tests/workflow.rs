@@ -363,3 +363,69 @@ fn ship_without_a_repo_warns_and_force_skips_the_gates() {
     let v = t.ok(None, &["ship", "EPIC-1-00", "--force"]);
     assert_eq!(v["released"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn wip_limits_per_column_and_agent_tier() {
+    let t = T::new("wip");
+    let cfg = t.write(
+        "w.cfg",
+        "backup_keep = 0\nagent.deep = opus\nagent.standard = sonnet\nwip.in_progress = 2\nwip.agent.deep = 1\nwip.in_review = 1\n",
+    );
+    let run = |s: Option<&str>, args: &[&str]| {
+        let mut c = t.cmd(s, &[]);
+        c.arg("--config").arg(&cfg).args(args);
+        t.exec(c)
+    };
+    for (title, tier) in [
+        ("a", "deep"),
+        ("b", "deep"),
+        ("c", "standard"),
+        ("d", "standard"),
+    ] {
+        assert_eq!(run(None, &["add", "CORE", title, "--agent", tier]).code, 0);
+    }
+    let o = run(Some("s1"), &["next", "--claim"]);
+    assert_eq!(o.json["issue"]["id"], "CORE-1-00");
+    // The deep tier is full, so the next agent gets standard work.
+    let o = run(Some("s2"), &["next", "--claim"]);
+    assert_eq!(o.json["issue"]["id"], "CORE-1-02", "{}", o.stdout);
+    // In progress is full.
+    let o = run(Some("s3"), &["next", "--claim"]);
+    assert_eq!(
+        (o.code, err_code(&o.json).as_str()),
+        (4, "WIP_LIMIT"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(o.json["error"]["retryable"], true);
+    let o = run(None, &["next", "--explain", "CORE-1-03"]);
+    assert_eq!(o.json["blockers"][0]["code"], "WIP_LIMIT");
+    // Renewing an existing claim is not a new claim.
+    assert_eq!(run(Some("s1"), &["claim", "CORE-1-00"]).code, 0);
+    // Handing work to review frees a slot.
+    assert_eq!(
+        run(
+            Some("s1"),
+            &["state", "CORE-1-00", "in_review", "--gen", "1"]
+        )
+        .code,
+        0
+    );
+    assert_eq!(run(Some("s3"), &["claim", "CORE-1-03"]).code, 0);
+    // Review is full.
+    let o = run(
+        Some("s2"),
+        &["state", "CORE-1-02", "in_review", "--gen", "1"],
+    );
+    assert_eq!(err_code(&o.json), "WIP_LIMIT", "{}", o.stdout);
+    let o = run(
+        Some("s2"),
+        &["state", "CORE-1-02", "in_review", "--gen", "1", "--force"],
+    );
+    assert_eq!(o.code, 0, "{}", o.stdout);
+    // Bad limits are configuration errors.
+    let bad = t.write("bad.cfg", "wip.everything = 3\n");
+    let mut c = t.cmd(None, &["list"]);
+    c.arg("--config").arg(&bad);
+    assert_eq!(err_code(&t.exec(c).json), "CONFIG");
+}

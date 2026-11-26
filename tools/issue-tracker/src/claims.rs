@@ -187,6 +187,9 @@ pub fn blockers(c: &Connection, env: &Env, ap: &Approvals, id: &str) -> Result<V
             "ids": ids,
         }));
     }
+    if let Some(w) = wip_block(c, env, id)? {
+        out.push(json!({"code": "WIP_LIMIT", "message": w}));
+    }
     let cover = ap.check(id, today(env), "build");
     if !cover.ok() {
         out.push(json!({"code": cover.code(), "message": cover.message()}));
@@ -248,6 +251,9 @@ pub fn open_reviews(c: &Connection, id: &str) -> Result<(i64, Vec<String>)> {
 
 /// Moving `id` to in_review hands the work over: the claim is released.
 pub fn submit_for_review(c: &Connection, env: &Env, id: &str, force: bool) -> Result<()> {
+    if !force && let Some(w) = wip_review_block(c, env)? {
+        return Err(AitError::new("WIP_LIMIT", w).retryable());
+    }
     let kind: String = c.query_row("SELECT type FROM issues WHERE id = ?1", [id], |r| r.get(0))?;
     if kind == "review" {
         return Err(AitError::new(
@@ -272,6 +278,58 @@ pub fn submit_for_review(c: &Connection, env: &Env, id: &str, force: bool) -> Re
         )?;
     }
     Ok(())
+}
+
+/// Live claims, optionally only on issues of one agent tier.
+fn live_claims(c: &Connection, env: &Env, tier: Option<&str>) -> Result<i64> {
+    Ok(c.query_row(
+        "SELECT COUNT(*) FROM claims cl JOIN issues i ON i.id = cl.issue
+         WHERE cl.session IS NOT NULL AND cl.lease_until > ?1 AND (?2 IS NULL OR i.agent = ?2)",
+        params![env.now, tier],
+        |r| r.get(0),
+    )?)
+}
+
+/// Why claiming `id` would break a WIP limit, if it would.
+pub fn wip_block(c: &Connection, env: &Env, id: &str) -> Result<Option<String>> {
+    if let Some(limit) = env.cfg.wip_limit("in_progress") {
+        let n = live_claims(c, env, None)?;
+        if n >= limit {
+            return Ok(Some(format!(
+                "work in progress is at its limit ({n}/{limit} claimed; wip.in_progress)"
+            )));
+        }
+    }
+    let tier: Option<String> =
+        c.query_row("SELECT agent FROM issues WHERE id = ?1", [id], |r| r.get(0))?;
+    if let Some(t) = tier
+        && let Some(limit) = env.cfg.wip_limit(&format!("agent.{t}"))
+    {
+        let n = live_claims(c, env, Some(&t))?;
+        if n >= limit {
+            return Ok(Some(format!(
+                "agent tier {t} is at its limit ({n}/{limit} claimed; wip.agent.{t})"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Refuses moving another issue into review past `wip.in_review`.
+pub fn wip_review_block(c: &Connection, env: &Env) -> Result<Option<String>> {
+    if let Some(limit) = env.cfg.wip_limit("in_review") {
+        let n: i64 = c.query_row(
+            "SELECT COUNT(*) FROM issues WHERE state = 'in_review'",
+            [],
+            |r| r.get(0),
+        )?;
+        if n >= limit {
+            return Ok(Some(format!(
+                "review is at its limit ({n}/{limit} in review; wip.in_review)"
+            )));
+        }
+    }
+    Ok(None)
 }
 
 /// Filters for `next`.
@@ -315,6 +373,14 @@ pub fn candidates(c: &Connection, env: &Env, ap: &Approvals, p: &Pick) -> Result
         .collect::<rusqlite::Result<_>>()?;
     let t = today(env);
     let scope = if p.frame { "frame" } else { "build" };
+    let mut full_tiers: Vec<String> = Vec::new();
+    for (w, limit) in &env.cfg.wip {
+        if let Some(tier) = w.strip_prefix("agent.")
+            && live_claims(c, env, Some(tier))? >= *limit
+        {
+            full_tiers.push(tier.to_string());
+        }
+    }
     Ok(rows
         .into_iter()
         .filter(|(id, agent, prio, kind)| {
@@ -325,6 +391,7 @@ pub fn candidates(c: &Connection, env: &Env, ap: &Approvals, p: &Pick) -> Result
                     .as_ref()
                     .is_none_or(|x| agent.as_deref() == Some(x.as_str()))
                 && (p.priorities.is_empty() || p.priorities.contains(prio))
+                && (p.frame || agent.as_ref().is_none_or(|a| !full_tiers.contains(a)))
                 && ap.check(id, t, scope).ok()
         })
         .map(|r| r.0)
@@ -371,6 +438,12 @@ fn do_claim(c: &Connection, env: &Env, id: &str, take: bool) -> Result<Value> {
         return Err(AitError::new("REVIEW_NOT_STARTED", w));
     }
     let prev = claim_row(c, id)?;
+    // A new claim (not a renewal, not a live conflict) must fit the WIP limits.
+    if prev.as_ref().is_none_or(|p| !p.live(env.now))
+        && let Some(w) = wip_block(c, env, id)?
+    {
+        return Err(AitError::new("WIP_LIMIT", w).retryable());
+    }
     let lease_until = env.now + env.lease_ms();
     let mut taken_from = Value::Null;
     let mut renewed = false;

@@ -32,6 +32,7 @@ main { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px
 .col.over { outline: 2px dashed var(--accent); }
 .col h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
 .col h2 .n { color: var(--muted); }
+.col h2 .n.full { color: var(--bad); font-weight: 600; }
 .col[data-col=in_progress] h2 { color: var(--accent); }
 .col[data-col=in_review] h2 { color: var(--accent); }
 .col[data-col=waiting] h2 { color: var(--warn); }
@@ -134,7 +135,7 @@ const TYPES = ["task", "review", "feature", "milestone", "release"];
 const FINISHED = ["done", "released"];
 const PRIORITIES = ["P0", "P1", "P2", "P3", "P4"];
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
-let head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
+let wip = {}, head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -287,7 +288,13 @@ function renderColumns() {
       tog.addEventListener("click", e => { e.stopPropagation(); staleOnly = !staleOnly; renderColumns(); });
       h.append(tog);
     }
-    h.append(el("span", "n", items.length));
+    const limit = wip[key];
+    if (limit) {
+      const live = issues.filter(i => i.column === key && !i.stale).length;
+      const n = el("span", "n" + (live >= limit ? " full" : ""), live + " / " + limit);
+      n.title = "WIP limit (wip." + key + " in default.cfg); stale claims do not count";
+      h.append(n);
+    } else h.append(el("span", "n", items.length));
     const cards = el("div", "cards");
     if (!items.length) cards.append(el("div", "empty", "nothing here"));
     for (const i of items) cards.append(card(i));
@@ -591,6 +598,7 @@ function editForm(box, i) {
 async function refresh() {
   const [iv, bv, av, rv, nv] = await Promise.all([get("/api/issues"), get("/api/board"), get("/api/activity?limit=40"), get("/api/roadmap"), get("/api/next")]);
   issues = iv.issues;
+  wip = iv.wip || {};
   renderNext(nv);
   renderColumns();
   renderFeed(av.events);

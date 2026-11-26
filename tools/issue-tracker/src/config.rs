@@ -102,6 +102,8 @@ pub struct Config {
     pub repo: Option<PathBuf>,
     /// Agent tiers in order (cheapest first) with the model each maps to.
     pub agents: Vec<(String, String)>,
+    /// WIP limits: `in_progress`, `in_review` and `agent.<tier>`.
+    pub wip: Vec<(String, i64)>,
     pub port: u16,
     pub main_branch: String,
     pub trailer: String,
@@ -121,6 +123,7 @@ impl Default for Config {
             git_baseline: None,
             repo: None,
             agents: Vec::new(),
+            wip: Vec::new(),
             port: 7777,
             main_branch: "main".to_string(),
             trailer: "Issue-ID".to_string(),
@@ -233,6 +236,20 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config> {
                     Some(resolve(dir, v))
                 }
             }
+            k if k.starts_with("wip.") => {
+                let what = k["wip.".len()..].trim().to_ascii_lowercase();
+                let ok_key = what == "in_progress"
+                    || what == "in_review"
+                    || what.strip_prefix("agent.").is_some_and(valid_word);
+                let n: i64 = v.parse().unwrap_or(-1);
+                if !ok_key || n < 1 {
+                    return Err(bad(
+                        "use wip.in_progress = N, wip.in_review = N or wip.agent.<tier> = N (N >= 1)",
+                    ));
+                }
+                cfg.wip.retain(|(w, _)| *w != what);
+                cfg.wip.push((what, n));
+            }
             k if k.starts_with("agent.") => {
                 let tier = k["agent.".len()..].trim().to_ascii_lowercase();
                 if !valid_word(&tier) || v.is_empty() {
@@ -270,6 +287,11 @@ pub fn valid_word(s: &str) -> bool {
 }
 
 impl Config {
+    /// The WIP limit for `in_progress`, `in_review` or `agent.<tier>`.
+    pub fn wip_limit(&self, what: &str) -> Option<i64> {
+        self.wip.iter().find(|(w, _)| w == what).map(|(_, n)| *n)
+    }
+
     /// The model configured for an agent tier.
     pub fn model_for(&self, tier: &str) -> Option<&str> {
         self.agents
