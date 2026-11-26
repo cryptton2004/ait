@@ -642,3 +642,40 @@ fn stats_measure_time_in_each_column() {
     assert_eq!(v["columns"]["ready"]["count"], 0);
     assert_eq!(v["columns"]["in_review"]["count"], 1);
 }
+
+/// Ids follow the hierarchy: a feature opens a group (`CORE-2-00`), the
+/// issues under it take the numbers after `-00`, and loose tasks stay out
+/// of feature groups.
+#[test]
+fn features_open_groups_and_children_number_under_them() {
+    let t = T::new("idgroups");
+    let id = |v: serde_json::Value| v["issue"]["id"].as_str().unwrap().to_string();
+    let f1 = id(t.ok(None, &["add", "CORE", "first feature", "--type", "feature"]));
+    let f2 = id(t.ok(
+        None,
+        &["add", "CORE", "second feature", "--type", "feature"],
+    ));
+    assert_eq!((f1.as_str(), f2.as_str()), ("CORE-1-00", "CORE-2-00"));
+    let a = id(t.ok(None, &["add", "CORE", "task of 2", "--parent", "CORE-2-00"]));
+    let b = id(t.ok(None, &["add", "CORE", "task of 1", "--parent", "CORE-1-00"]));
+    let c = id(t.ok(
+        None,
+        &["add", "CORE", "another of 2", "--parent", "CORE-2-00"],
+    ));
+    assert_eq!(
+        (a.as_str(), b.as_str(), c.as_str()),
+        ("CORE-2-01", "CORE-1-01", "CORE-2-02")
+    );
+    // A loose task opens its own group instead of joining a feature's.
+    let loose = id(t.ok(None, &["add", "CORE", "loose"]));
+    assert_eq!(loose, "CORE-3-00");
+    assert_eq!(id(t.ok(None, &["add", "CORE", "loose 2"])), "CORE-3-01");
+    // An explicit group or id still wins.
+    assert_eq!(
+        id(t.ok(
+            None,
+            &["add", "CORE-9", "explicit", "--parent", "CORE-1-00"]
+        )),
+        "CORE-9-00"
+    );
+}

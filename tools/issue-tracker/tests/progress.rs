@@ -328,7 +328,8 @@ fn dashboard_writes_pass_the_cli_gates_and_only_from_its_own_page() {
         ],
     );
     assert_eq!(code, 200, "{v}");
-    assert_eq!(v["result"]["issue"]["id"], "CORE-1-02");
+    // A feature added with a bare prefix opens its own group.
+    assert_eq!(v["result"]["issue"]["id"], "CORE-2-00");
     let (code, v) = post(port, &same, &["add", "CORE", "bad", "--priority", "P9"]);
     assert_eq!(
         (code, v["error"]["code"].as_str()),
@@ -388,22 +389,23 @@ fn dashboard_writes_pass_the_cli_gates_and_only_from_its_own_page() {
         (409, Some("ALREADY_DONE"))
     );
 
-    // Rank: move changes what `next` offers first.
+    // Rank: move changes what `next` offers first. (The feature added above
+    // opened group 2, so these loose tasks continue group 1.)
     t.ok(None, &["add", "CORE", "third"]);
     t.ok(None, &["add", "CORE", "fourth"]);
     let (_, nv) = get(port, "/api/next");
     let nv: serde_json::Value = serde_json::from_str(&nv).unwrap();
-    assert_eq!(nv["build"][0]["id"], "CORE-1-03");
-    let (code, _) = post(port, &same, &["move", "CORE-1-04", "--top"]);
+    assert_eq!(nv["build"][0]["id"], "CORE-1-02");
+    let (code, _) = post(port, &same, &["move", "CORE-1-03", "--top"]);
     assert_eq!(code, 200);
     let (_, nv) = get(port, "/api/next");
     let nv: serde_json::Value = serde_json::from_str(&nv).unwrap();
-    assert_eq!(nv["build"][0]["id"], "CORE-1-04");
-    let (code, _) = post(port, &same, &["note", "CORE-1-04", "looked at it"]);
+    assert_eq!(nv["build"][0]["id"], "CORE-1-03");
+    let (code, _) = post(port, &same, &["note", "CORE-1-03", "looked at it"]);
     assert_eq!(code, 200);
 
     // Dashboard writes are recorded as the "dashboard" session.
-    let v = t.ok(None, &["activity", "--issue", "CORE-1-04"]);
+    let v = t.ok(None, &["activity", "--issue", "CORE-1-03"]);
     let sessions: Vec<&str> = v["events"]
         .as_array()
         .unwrap()
@@ -480,12 +482,12 @@ fn dashboard_columns_follow_the_flow() {
     assert_eq!(col("CORE-1-04"), ("backlog".to_string(), false));
     // A stale claim stays in progress, flagged.
     assert_eq!(col("CORE-1-05"), ("in_progress".to_string(), true));
-    assert_eq!(col("CORE-1-06"), ("ready".to_string(), false));
+    assert_eq!(col("CORE-2-00"), ("ready".to_string(), false));
     let epic = v["issues"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|i| i["id"] == "CORE-1-06")
+        .find(|i| i["id"] == "CORE-2-00")
         .unwrap();
     assert!(
         epic["wait"].as_str().unwrap().contains("not offered"),

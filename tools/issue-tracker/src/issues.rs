@@ -752,7 +752,12 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         if let Some(l) = legacy {
             legacy_free(c, l, "")?;
         }
-        let id = ids::allocate(c, &env.cfg.prefixes, spec, after.as_deref())?;
+        let container = matches!(f.kind.as_deref(), Some("feature" | "milestone" | "release"));
+        let hint = ids::Hint {
+            parent: parent.as_deref(),
+            container,
+        };
+        let id = ids::allocate(c, &env.cfg.prefixes, spec, after.as_deref(), hint)?;
         let pos = match after.as_deref() {
             Some(x) => Place::After(x),
             None => Place::End,

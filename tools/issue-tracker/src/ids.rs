@@ -73,6 +73,24 @@ fn used(conn: &Connection, prefix: &str) -> Result<Vec<(u32, u32)>> {
     Ok(out)
 }
 
+/// Groups of `prefix` whose `-00` issue is a feature, milestone or release.
+fn container_groups(conn: &Connection, prefix: &str) -> Result<Vec<u32>> {
+    let like = format!("{prefix}-%-00");
+    let mut stmt = conn.prepare(
+        "SELECT id FROM issues WHERE id LIKE ?1 AND type IN ('feature', 'milestone', 'release')",
+    )?;
+    let rows = stmt.query_map([&like], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for id in rows {
+        if let Some((p, g, 0)) = parse_id(&id?)
+            && p == prefix
+        {
+            out.push(g);
+        }
+    }
+    Ok(out)
+}
+
 fn taken(conn: &Connection, id: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT (SELECT COUNT(*) FROM issues WHERE id = ?1) + (SELECT COUNT(*) FROM retired_ids WHERE id = ?1)",
@@ -82,13 +100,26 @@ fn taken(conn: &Connection, id: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// What the new issue is, for picking its group from a bare prefix.
+#[derive(Default, Clone, Copy)]
+pub struct Hint<'a> {
+    /// Its parent: a child takes the next number in its parent's group.
+    pub parent: Option<&'a str>,
+    /// A feature, milestone or release opens a new group (`CORE-2-00`); the
+    /// numbers after `-00` are for the issues under it.
+    pub container: bool,
+}
+
 /// Picks a new id. `spec` is a prefix (`CORE`), a group (`CORE-2`) or a full
-/// id (`CORE-1-05`). `after` picks the next free number after that id.
+/// id (`CORE-1-05`). `after` picks the next free number after that id. For a
+/// bare prefix, `hint` decides the group (see `Hint`); otherwise the newest
+/// group is used.
 pub fn allocate(
     conn: &Connection,
     allowed: &[String],
     spec: &str,
     after: Option<&str>,
+    hint: Hint,
 ) -> Result<String> {
     let spec = spec.trim().to_ascii_uppercase();
     if let Some((p, _, _)) = parse_id(&spec) {
@@ -133,11 +164,61 @@ pub fn allocate(
         ));
     }
 
-    let g = group.unwrap_or_else(|| used.iter().map(|x| x.0).max().unwrap_or(1));
+    if group.is_none() {
+        let parent_group = hint
+            .parent
+            .and_then(parse_id)
+            .filter(|(pp, _, _)| *pp == prefix)
+            .map(|(_, pg, _)| pg);
+        if let Some(pg) = parent_group {
+            return match used.iter().filter(|x| x.0 == pg).map(|x| x.1).max() {
+                None => Ok(format_id(&prefix, pg, 0)),
+                Some(n) if n < 99 => Ok(format_id(&prefix, pg, n + 1)),
+                Some(_) => Err(AitError::new(
+                    "GROUP_FULL",
+                    format!(
+                        "group {prefix}-{pg} (of the parent) has no free numbers left; pass a group or id explicitly"
+                    ),
+                )),
+            };
+        }
+        if hint.container {
+            return match used.iter().map(|x| x.0).max() {
+                None => Ok(format_id(&prefix, 1, 0)),
+                Some(g) if g < 99_999 => Ok(format_id(&prefix, g + 1, 0)),
+                Some(_) => Err(AitError::new(
+                    "GROUP_FULL",
+                    format!("prefix {prefix} has no free groups left"),
+                )),
+            };
+        }
+    }
+    // A loose issue (no parent in this prefix, not a container) never lands
+    // in a group opened by a feature, milestone or release: those numbers
+    // belong to the issues under it. It goes to the newest other group, or
+    // opens a new one.
+    let newest = used.iter().map(|x| x.0).max();
+    let g = match group {
+        Some(g) => g,
+        None => {
+            let reserved = container_groups(conn, &prefix)?;
+            match used
+                .iter()
+                .map(|x| x.0)
+                .filter(|g| !reserved.contains(g))
+                .max()
+            {
+                Some(g) => g,
+                None => newest.map_or(1, |n| n + 1),
+            }
+        }
+    };
     match used.iter().filter(|x| x.0 == g).map(|x| x.1).max() {
         None => Ok(format_id(&prefix, g, 0)),
         Some(n) if n < 99 => Ok(format_id(&prefix, g, n + 1)),
-        Some(_) if group.is_none() && g < 99_999 => Ok(format_id(&prefix, g + 1, 0)),
+        Some(_) if group.is_none() && newest.is_some_and(|n| n < 99_999) => {
+            Ok(format_id(&prefix, newest.map_or(1, |n| n + 1), 0))
+        }
         Some(_) => Err(AitError::new(
             "GROUP_FULL",
             format!("group {prefix}-{g} has no free numbers left"),
@@ -165,7 +246,7 @@ mod tests {
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
-            "CREATE TABLE issues (id TEXT PRIMARY KEY); CREATE TABLE retired_ids (id TEXT PRIMARY KEY);",
+            "CREATE TABLE issues (id TEXT PRIMARY KEY, type TEXT NOT NULL DEFAULT 'task'); CREATE TABLE retired_ids (id TEXT PRIMARY KEY);",
         )
         .unwrap();
         c
@@ -174,29 +255,43 @@ mod tests {
     #[test]
     fn allocates_in_sequence_and_gaps() {
         let c = db();
-        assert_eq!(allocate(&c, &[], "core", None).unwrap(), "CORE-1-00");
-        c.execute_batch("INSERT INTO issues VALUES ('CORE-1-00'),('CORE-1-10'),('CORE-1-11');")
-            .unwrap();
-        assert_eq!(allocate(&c, &[], "CORE", None).unwrap(), "CORE-1-12");
         assert_eq!(
-            allocate(&c, &[], "CORE", Some("CORE-1-10")).unwrap(),
+            allocate(&c, &[], "core", None, Hint::default()).unwrap(),
+            "CORE-1-00"
+        );
+        c.execute_batch("INSERT INTO issues(id) VALUES ('CORE-1-00'),('CORE-1-10'),('CORE-1-11');")
+            .unwrap();
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, Hint::default()).unwrap(),
             "CORE-1-12"
         );
         assert_eq!(
-            allocate(&c, &[], "CORE", Some("CORE-1-00")).unwrap(),
+            allocate(&c, &[], "CORE", Some("CORE-1-10"), Hint::default()).unwrap(),
+            "CORE-1-12"
+        );
+        assert_eq!(
+            allocate(&c, &[], "CORE", Some("CORE-1-00"), Hint::default()).unwrap(),
             "CORE-1-01"
         );
-        assert_eq!(allocate(&c, &[], "CORE-2", None).unwrap(), "CORE-2-00");
+        assert_eq!(
+            allocate(&c, &[], "CORE-2", None, Hint::default()).unwrap(),
+            "CORE-2-00"
+        );
         // --after in another prefix only affects ordering.
         assert_eq!(
-            allocate(&c, &[], "PAP", Some("CORE-1-10")).unwrap(),
+            allocate(&c, &[], "PAP", Some("CORE-1-10"), Hint::default()).unwrap(),
             "PAP-1-00"
         );
         c.execute_batch("INSERT INTO retired_ids VALUES ('CORE-1-12');")
             .unwrap();
-        assert_eq!(allocate(&c, &[], "CORE", None).unwrap(), "CORE-1-13");
         assert_eq!(
-            allocate(&c, &[], "CORE-1-12", None).unwrap_err().code,
+            allocate(&c, &[], "CORE", None, Hint::default()).unwrap(),
+            "CORE-1-13"
+        );
+        assert_eq!(
+            allocate(&c, &[], "CORE-1-12", None, Hint::default())
+                .unwrap_err()
+                .code,
             "ID_TAKEN"
         );
     }
@@ -204,12 +299,111 @@ mod tests {
     #[test]
     fn rolls_over_to_next_group() {
         let c = db();
-        c.execute_batch("INSERT INTO issues VALUES ('PAP-3-99');")
+        c.execute_batch("INSERT INTO issues(id) VALUES ('PAP-3-99');")
             .unwrap();
-        assert_eq!(allocate(&c, &[], "PAP", None).unwrap(), "PAP-4-00");
         assert_eq!(
-            allocate(&c, &[], "PAP-3", None).unwrap_err().code,
+            allocate(&c, &[], "PAP", None, Hint::default()).unwrap(),
+            "PAP-4-00"
+        );
+        assert_eq!(
+            allocate(&c, &[], "PAP-3", None, Hint::default())
+                .unwrap_err()
+                .code,
             "GROUP_FULL"
+        );
+    }
+
+    #[test]
+    fn features_open_a_group_and_children_join_their_parent() {
+        let c = db();
+        let feature = Hint {
+            parent: None,
+            container: true,
+        };
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, feature).unwrap(),
+            "CORE-1-00"
+        );
+        c.execute_batch("INSERT INTO issues(id) VALUES ('CORE-1-00');")
+            .unwrap();
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, feature).unwrap(),
+            "CORE-2-00"
+        );
+        c.execute_batch("INSERT INTO issues(id) VALUES ('CORE-2-00');")
+            .unwrap();
+        let under = |p| Hint {
+            parent: Some(p),
+            container: false,
+        };
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, under("CORE-1-00")).unwrap(),
+            "CORE-1-01"
+        );
+        c.execute_batch("INSERT INTO issues(id) VALUES ('CORE-1-01'),('CORE-1-02');")
+            .unwrap();
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, under("CORE-1-00")).unwrap(),
+            "CORE-1-03"
+        );
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, under("CORE-2-00")).unwrap(),
+            "CORE-2-01"
+        );
+        // A sub-feature under a feature joins the parent's group too.
+        let sub = Hint {
+            parent: Some("CORE-2-00"),
+            container: true,
+        };
+        assert_eq!(allocate(&c, &[], "CORE", None, sub).unwrap(), "CORE-2-01");
+        // A parent with another prefix does not choose the group.
+        assert_eq!(
+            allocate(&c, &[], "PAP", None, under("CORE-1-00")).unwrap(),
+            "PAP-1-00"
+        );
+        // An explicit group or id still wins.
+        assert_eq!(
+            allocate(&c, &[], "CORE-7", None, under("CORE-1-00")).unwrap(),
+            "CORE-7-00"
+        );
+        // A full parent group is an error, not a silent jump elsewhere.
+        c.execute_batch("INSERT INTO issues(id) VALUES ('CORE-3-99');")
+            .unwrap();
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, under("CORE-3-99"))
+                .unwrap_err()
+                .code,
+            "GROUP_FULL"
+        );
+    }
+
+    #[test]
+    fn loose_issues_stay_out_of_feature_groups() {
+        let c = db();
+        c.execute_batch(
+            "INSERT INTO issues VALUES ('CORE-1-00', 'feature'), ('CORE-1-01', 'task');",
+        )
+        .unwrap();
+        // Only feature groups exist: a loose task opens a new group.
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, Hint::default()).unwrap(),
+            "CORE-2-00"
+        );
+        c.execute_batch(
+            "INSERT INTO issues VALUES ('CORE-2-00', 'task'), ('CORE-3-00', 'release');",
+        )
+        .unwrap();
+        // The newest group that is not a container's is used.
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, Hint::default()).unwrap(),
+            "CORE-2-01"
+        );
+        // When that group is full, a new group after the newest one opens.
+        c.execute_batch("INSERT INTO issues(id) VALUES ('CORE-2-99');")
+            .unwrap();
+        assert_eq!(
+            allocate(&c, &[], "CORE", None, Hint::default()).unwrap(),
+            "CORE-4-00"
         );
     }
 
@@ -218,9 +412,11 @@ mod tests {
         let c = db();
         let allowed = vec!["CORE".to_string()];
         assert_eq!(
-            allocate(&c, &allowed, "PAP", None).unwrap_err().code,
+            allocate(&c, &allowed, "PAP", None, Hint::default())
+                .unwrap_err()
+                .code,
             "UNKNOWN_PREFIX"
         );
-        assert!(allocate(&c, &allowed, "CORE", None).is_ok());
+        assert!(allocate(&c, &allowed, "CORE", None, Hint::default()).is_ok());
     }
 }
