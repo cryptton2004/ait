@@ -302,7 +302,7 @@ fn dashboard_writes_pass_the_cli_gates_and_only_from_its_own_page() {
 
     // Only planning commands, and no options that pick files or identity.
     for args in [
-        &["delete", "CORE-1-01"][..],
+        &["backup"][..],
         &["heartbeat"],
         &["import", "x.jsonl"],
         &["add", "CORE", "x", "--db", "other.db"],
@@ -631,7 +631,7 @@ fn allowed_origin_can_write_through_the_same_gates() {
         (code, v["error"]["code"].as_str()),
         (400, Some("INVALID_INPUT"))
     );
-    let (code, v) = post(port, &hdr, &["delete", "CORE-1-00"]);
+    let (code, v) = post(port, &hdr, &["backup"]);
     assert_eq!((code, v["error"]["code"].as_str()), (400, Some("USAGE")));
     // Without the token it is still refused.
     let no_token = format!("Content-Type: application/json\r\n{ui}Sec-Fetch-Site: same-site\r\n");
@@ -673,4 +673,113 @@ fn allowed_origins_must_be_local() {
         assert_eq!(r.code, 2, "{bad}: {}", r.stdout);
         assert!(r.stdout.contains("CONFIG"), "{bad}: {}", r.stdout);
     }
+}
+
+/// The List view: every issue (dropped too), newest first, with filters,
+/// search across id/title/description/labels, sorting, paging and progress;
+/// delete from the dashboard follows the CLI rules.
+#[test]
+fn list_view_shows_everything_with_filters_and_paging() {
+    let t = T::new("listview");
+    t.ok_at(None, T0, &["add", "CORE", "Epic", "--type", "feature"]);
+    t.ok_at(
+        None,
+        T0 + MIN,
+        &[
+            "add",
+            "CORE",
+            "Login form",
+            "--parent",
+            "CORE-1-00",
+            "--labels",
+            "ui",
+        ],
+    );
+    t.ok_at(
+        None,
+        T0 + 2 * MIN,
+        &[
+            "add",
+            "CORE",
+            "Schema",
+            "--body",
+            "needs a Postgres index",
+            "--criteria",
+            "a\nb",
+        ],
+    );
+    t.ok_at(None, T0 + 3 * MIN, &["add", "CORE", "Old idea"]);
+    t.ok_at(
+        None,
+        T0 + 4 * MIN,
+        &["state", "CORE-2-01", "dropped", "--reason", "no"],
+    );
+    t.ok_at(
+        None,
+        T0 + 5 * MIN,
+        &["done", "CORE-1-01", "--summary", "ok", "--force"],
+    );
+    t.ok_at(Some("a1"), T0 + 6 * MIN, &["claim", "CORE-2-00"]);
+    t.ok_at(
+        Some("a1"),
+        T0 + 6 * MIN,
+        &["criteria", "CORE-2-00", "--check", "1"],
+    );
+    let (_server, port) = start_server(&t, &[]);
+    let list = |q: &str| -> serde_json::Value {
+        let (code, v) = get(port, &format!("/api/list{q}"));
+        assert_eq!(code, 200, "{v}");
+        serde_json::from_str(&v).unwrap()
+    };
+    let ids = |v: &serde_json::Value| -> Vec<String> {
+        v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let v = list("");
+    assert_eq!(v["total"], 4);
+    assert_eq!(
+        ids(&v),
+        ["CORE-2-01", "CORE-2-00", "CORE-1-01", "CORE-1-00"]
+    );
+    let by = |id: &str| {
+        v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by("CORE-1-00")["percent"], 100);
+    assert_eq!(by("CORE-2-00")["percent"], 50);
+    assert_eq!(by("CORE-2-00")["assignee"], "a1");
+    assert_eq!(by("CORE-1-01")["labels"], serde_json::json!(["ui"]));
+    assert_eq!(ids(&list("?state=dropped")), ["CORE-2-01"]);
+    assert_eq!(ids(&list("?label=ui")), ["CORE-1-01"]);
+    assert_eq!(ids(&list("?q=postgres%20INDEX")), ["CORE-2-00"]);
+    assert_eq!(ids(&list("?q=login+form")), ["CORE-1-01"]);
+    assert_eq!(
+        ids(&list("?sort=title&dir=asc")),
+        ["CORE-1-00", "CORE-1-01", "CORE-2-01", "CORE-2-00"]
+    );
+    let page = list("?limit=3");
+    assert_eq!((page["total"].as_i64(), ids(&page).len()), (Some(4), 3));
+    assert_eq!(ids(&list("?offset=3&limit=3")), ["CORE-1-00"]);
+
+    // Delete runs `ait delete`: a claimed issue needs --force.
+    let token = page_token(port);
+    let hdr = format!("Content-Type: application/json\r\nX-Ait-Token: {token}\r\n");
+    let (code, v) = post(port, &hdr, &["delete", "CORE-2-00"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (409, Some("IN_USE")),
+        "{v}"
+    );
+    let (code, v) = post(port, &hdr, &["delete", "CORE-2-01"]);
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(list("")["total"], 3);
 }

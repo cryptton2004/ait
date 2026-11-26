@@ -32,7 +32,7 @@ pub const DASHBOARD_SESSION: &str = "dashboard";
 /// serve, backup...) stays on the command line.
 const WRITE_COMMANDS: &[&str] = &[
     "add", "edit", "state", "move", "done", "note", "link", "unlink", "ship", "criteria", "claim",
-    "release",
+    "delete", "release",
 ];
 
 /// Options a dashboard request may not pass (they would pick another
@@ -166,6 +166,169 @@ fn query<'a>(q: &'a str, key: &str) -> Option<&'a str> {
         let (k, v) = kv.split_once('=')?;
         (k == key).then_some(v)
     })
+}
+
+/// A query value with `%XX` and `+` decoded (invalid escapes stay as typed).
+fn decode(v: &str) -> String {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(x) => {
+                        out.push(x);
+                        i += 2;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            x => out.push(x),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn query_dec(q: &str, key: &str) -> Option<String> {
+    query(q, key).map(decode).filter(|v| !v.trim().is_empty())
+}
+
+/// `/api/list`: every issue (dropped and released too), newest first by
+/// default, with filters, search, sorting and paging for the List view.
+fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
+    let csv = |k: &str| -> Vec<String> {
+        query_dec(q, k)
+            .map(|v| {
+                v.split(',')
+                    .map(|x| x.trim().to_ascii_lowercase())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let states = csv("state");
+    let types = csv("type");
+    let labels = csv("label");
+    let search = query_dec(q, "q").map(|s| s.to_lowercase());
+    let sort = match query(q, "sort").unwrap_or("created") {
+        "id" => "i.id",
+        "state" => "i.state",
+        "title" => "lower(i.title)",
+        "priority" => "i.priority",
+        "updated" => "i.updated_at",
+        "assignee" => "c.session",
+        _ => "i.created_at",
+    };
+    let dir = if query(q, "dir") == Some("asc") {
+        "ASC"
+    } else {
+        "DESC"
+    };
+    let offset: i64 = query(q, "offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .max(0);
+    let limit: i64 = query(q, "limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50)
+        .max(1);
+    let mut st = c.prepare(&format!(
+        "SELECT i.id, i.title, i.state, i.type, i.priority, i.labels, i.created_at, i.updated_at,
+                i.parent, c.session, c.lease_until, lower(i.id || ' ' || i.title || ' ' || i.body || ' ' || i.labels)
+         FROM issues i LEFT JOIN claims c ON c.issue = i.id
+         ORDER BY {sort} {dir}, i.id {dir}"
+    ))?;
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        String,
+    );
+    let rows: Vec<Row> = st
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let matching: Vec<Row> = rows
+        .into_iter()
+        .filter(|r| {
+            let row_labels = issues::label_list(&r.5);
+            (states.is_empty() || states.contains(&r.2))
+                && (types.is_empty() || types.contains(&r.3))
+                && labels.iter().all(|l| row_labels.contains(l))
+                && search
+                    .as_ref()
+                    .is_none_or(|s| s.split_whitespace().all(|w| r.11.contains(w)))
+        })
+        .collect();
+    let total = matching.len();
+    let ap = claims::load_approvals(env)?;
+    let offered = claims::ready_ids(c, env, &ap, false)?;
+    let mut out = Vec::new();
+    for r in matching
+        .into_iter()
+        .skip(usize::try_from(offset).unwrap_or(0))
+        .take(usize::try_from(limit).unwrap_or(50))
+    {
+        let finished = issues::FINISHED.contains(&r.2.as_str());
+        // Progress: containers by their members, others by their own state
+        // or, while open, by their acceptance criteria.
+        let percent = if ["feature", "milestone", "release"].contains(&r.3.as_str()) {
+            crate::roadmap::rollup_with(c, env, &offered, &r.0)?["percent"]
+                .as_i64()
+                .unwrap_or(0)
+        } else if finished {
+            100
+        } else {
+            let (n, done): (i64, i64) = c.query_row(
+                "SELECT COUNT(*), COUNT(done_at) FROM criteria WHERE issue = ?1",
+                [&r.0],
+                |x| Ok((x.get(0)?, x.get(1)?)),
+            )?;
+            if n > 0 { done * 100 / n } else { 0 }
+        };
+        let live = r.9.is_some() && r.10.is_some_and(|l| l > env.now);
+        out.push(json!({
+            "id": r.0,
+            "title": r.1,
+            "state": r.2,
+            "type": r.3,
+            "priority": r.4,
+            "labels": issues::label_list(&r.5),
+            "created_at": crate::time::iso(r.6),
+            "updated_at": crate::time::iso(r.7),
+            "parent": r.8,
+            "assignee": r.9,
+            "claim_status": if r.9.is_none() { Value::Null } else if live { json!("live") } else { json!("stale") },
+            "percent": percent,
+        }));
+    }
+    Ok(json!({"total": total, "offset": offset, "issues": out}))
 }
 
 struct Request {
@@ -353,6 +516,7 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
         "/api/issues" => db::read(c, |c| issues_view(c, &env)),
         "/api/roadmap" => db::read(c, |c| crate::roadmap::roadmap_json(c, &env, false)),
         "/api/next" => next_view(c, &env),
+        "/api/list" => db::read(c, |c| list_view(c, &env, q)),
         "/api/stats" => {
             let since = query(q, "since")
                 .map(crate::time::parse_duration)
