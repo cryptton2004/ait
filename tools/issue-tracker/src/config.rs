@@ -349,10 +349,10 @@ mod tests {
         assert!(c.db.is_none());
         assert_eq!(c.lease_minutes, 60);
         assert_eq!(c.backup_keep, 14);
-        assert_eq!(
-            c.approvals,
-            Some(Source::File(Path::new("base").join("approvals.json")))
-        );
+        // Approvals are opt-in: a configured but missing file approves
+        // nothing, so the shipped config leaves the key unset.
+        assert_eq!(c.approvals, None);
+        assert_eq!(c.model_for("deep"), Some("opus"));
     }
 
     #[test]
