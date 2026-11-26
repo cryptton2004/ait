@@ -22,6 +22,7 @@ mod ids;
 mod issues;
 mod notes;
 mod output;
+mod roadmap;
 mod serve;
 mod time;
 
@@ -142,6 +143,7 @@ fn run(raw: Vec<String>) -> Result<Output> {
         "show" => issues::cmd_show(c, &env, &a),
         "list" | "ls" => issues::cmd_list(c, &env, &a),
         "next" => claims::cmd_next(c, &env, &a),
+        "roadmap" => roadmap::cmd_roadmap(c, &env, &a),
         "claim" => claims::cmd_claim(c, &env, &a),
         "release" => claims::cmd_release(c, &env, &a),
         "done" => claims::cmd_done(c, &env, &a),

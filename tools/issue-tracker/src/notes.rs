@@ -70,6 +70,7 @@ fn add_note(
     kind: &str,
     body: &str,
     want: Option<i64>,
+    force: bool,
 ) -> Result<Value> {
     if body.trim().is_empty() {
         return Err(AitError::new(
@@ -77,13 +78,8 @@ fn add_note(
             format!("{kind} text must not be empty"),
         ));
     }
-    let row = claims::claim_row(c, id)?;
-    claims::check_gen(row.as_ref(), id, want)?;
-    // Record the generation when the author holds the claim.
-    let generation = row
-        .as_ref()
-        .filter(|r| r.session.is_some() && r.session == env.session)
-        .map(|r| r.generation);
+    // Only the live claimant may write; records its generation.
+    let generation = claims::guard_write(c, env, id, force, want)?;
     c.execute(
         "INSERT INTO notes(issue, session, kind, body, generation, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![id, env.session, kind, body, generation, env.now],
@@ -101,7 +97,7 @@ fn add_note(
 }
 
 pub fn cmd_note(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["text-file", "gen"], 2)?;
+    a.expect(&["text-file", "gen", "force"], 2)?;
     let input = a.req_pos(0, "issue id")?;
     let body = note_text(a, "text-file")?.ok_or_else(|| {
         AitError::usage("note needs text: ait note <id> \"...\" (or --text-file <path>)")
@@ -109,14 +105,14 @@ pub fn cmd_note(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     let want = a.opt_i64("gen")?;
     let v = db::write(c, |c| {
         let id = issues::resolve(c, input)?;
-        add_note(c, env, &id, "note", &body, want)
+        add_note(c, env, &id, "note", &body, want, a.flag("force"))
     })?;
     let text = format!("noted on {} (#{})", s(&v, "issue"), v["id"]);
     Ok(Output::new(json!({"note": v}), text))
 }
 
 pub fn cmd_handoff(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["from-file", "gen"], 2)?;
+    a.expect(&["from-file", "gen", "force"], 2)?;
     let input = a.req_pos(0, "issue id")?;
     let body = note_text(a, "from-file")?;
     let want = a.opt_i64("gen")?;
@@ -124,7 +120,7 @@ pub fn cmd_handoff(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         Some(body) => {
             let v = db::write(c, |c| {
                 let id = issues::resolve(c, input)?;
-                add_note(c, env, &id, "handoff", &body, want)
+                add_note(c, env, &id, "handoff", &body, want, a.flag("force"))
             })?;
             let text = format!("handoff saved for {} (#{})", s(&v, "issue"), v["id"]);
             Ok(Output::new(json!({"handoff": v}), text))

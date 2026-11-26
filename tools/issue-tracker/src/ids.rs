@@ -46,7 +46,7 @@ fn check_prefix(prefix: &str, allowed: &[String]) -> Result<()> {
         return Err(AitError::new(
             "UNKNOWN_PREFIX",
             format!(
-                "prefix '{prefix}' is not in default.cfg (allowed: {})",
+                "prefix '{prefix}' is not one of the configured prefixes ({})",
                 allowed.join(", ")
             ),
         ));

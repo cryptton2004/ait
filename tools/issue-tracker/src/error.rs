@@ -8,6 +8,8 @@ pub struct AitError {
     pub code: &'static str,
     pub message: String,
     pub retryable: bool,
+    /// Extra structured data (for example every problem an import found).
+    pub details: Option<serde_json::Value>,
 }
 
 pub type Result<T> = std::result::Result<T, AitError>;
@@ -18,6 +20,7 @@ impl AitError {
             code,
             message: message.into(),
             retryable: false,
+            details: None,
         }
     }
 
@@ -40,7 +43,7 @@ impl AitError {
     pub fn exit_code(&self) -> i32 {
         match self.code {
             "USAGE" | "INVALID_ID" | "INVALID_INPUT" | "INVALID_STATE" | "UNKNOWN_PREFIX"
-            | "CONFIG" | "NO_SESSION" | "NO_DB" | "INVALID_JSON" => 2,
+            | "CONFIG" | "NO_SESSION" | "NO_DB" | "INVALID_JSON" | "IMPORT_INVALID" => 2,
             "NOT_FOUND" => 3,
             "ALREADY_CLAIMED" | "CLAIM_STALE" | "STALE_GENERATION" | "NOT_CLAIMANT"
             | "NOT_CLAIMED" | "VERSION_CONFLICT" | "CYCLE" | "IN_USE" | "NOT_EMPTY"
@@ -52,14 +55,21 @@ impl AitError {
         }
     }
 
+    pub fn with_details(mut self, d: serde_json::Value) -> Self {
+        self.details = Some(d);
+        self
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "error": {
-                "code": self.code,
-                "message": self.message,
-                "retryable": self.retryable,
-            }
-        })
+        let mut e = serde_json::json!({
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+        });
+        if let (Some(d), Some(o)) = (&self.details, e.as_object_mut()) {
+            o.insert("details".to_string(), d.clone());
+        }
+        serde_json::json!({ "error": e })
     }
 
     /// JSON mode prints the error object on stdout (one stream for agents to

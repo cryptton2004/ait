@@ -27,7 +27,11 @@ fn seed(t: &T) {
     t.ok_at(None, T0, &["add", "CORE", "finished"]);
     t.ok_at(Some("old"), T0 - 120 * MIN, &["claim", "CORE-1-01"]);
     t.ok_at(Some("a1"), T0, &["claim", "CORE-1-00"]);
-    t.ok_at(None, T0, &["done", "CORE-1-04", "--summary", "shipped it"]);
+    t.ok_at(
+        None,
+        T0,
+        &["done", "CORE-1-04", "--summary", "shipped it", "--force"],
+    );
 }
 
 #[test]

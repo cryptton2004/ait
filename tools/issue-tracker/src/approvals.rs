@@ -1,17 +1,25 @@
-//! Owner-only approvals, read from a protected JSON file next to
-//! `default.cfg`. `ait` only ever reads this file.
+//! Owner-only approvals. `ait` only ever reads this file. It can live on disk
+//! (`approvals = approvals.json`) or be read from a committed blob
+//! (`approvals = git:main:docs/planning/approvals.json`).
 //!
 //! ```json
 //! {"approvals": [
 //!   {"match": "CORE-1", "scope": "build", "from": "2026-11-01",
-//!    "until": "2026-12-31", "exclude": ["CORE-1-05"]}
+//!    "until": "2026-12-31", "exclude": ["CORE-1-05"], "note": "ignored"}
 //! ]}
 //! ```
-//! `match` is `*`, a full id, or an id prefix ending at a `-` boundary
-//! (`CORE` covers `CORE-1-00`; `CORE-1` covers `CORE-1-xx`). If the file does
-//! not exist, approvals are not in use and every ready issue is offered.
+//! A top-level array works too. `match` is `*`, a full id, or an id prefix
+//! ending at a `-` boundary (`CORE` covers `CORE-1-00`; `CORE-1` covers
+//! `CORE-1-xx`), case-insensitive.
+//!
+//! Scopes: `build` lets agents implement `ready` issues (`ait next`);
+//! `frame` lets agents write `idea`/`planned` issues up to `ready`
+//! (`ait next --frame`). A build approval also allows framing.
+//! If the file does not exist, approvals are not in use and everything is offered.
 
+use crate::config::Source;
 use crate::error::{AitError, Result};
+use crate::time::day;
 use serde_json::Value;
 use std::path::Path;
 
@@ -28,21 +36,86 @@ pub struct Approval {
 pub struct Approvals {
     /// `None` = approvals not in use.
     pub list: Option<Vec<Approval>>,
+    /// The configured source that does not exist: nothing is approved.
+    pub missing: Option<String>,
+}
+
+/// Whether an approval covers an issue, and if not, the most useful reason.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cover {
+    NotInUse,
+    Covered { pattern: String },
+    FrameOnly { pattern: String, until: Option<i64> },
+    Excluded { pattern: String, by: String },
+    Expired { pattern: String, until: i64 },
+    NotStarted { pattern: String, from: i64 },
+    NotCovered,
+    Missing { source: String },
+}
+
+impl Cover {
+    pub fn ok(&self) -> bool {
+        matches!(self, Cover::NotInUse | Cover::Covered { .. })
+    }
+
+    /// Short machine code for `--explain` output.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Cover::NotInUse | Cover::Covered { .. } => "APPROVED",
+            Cover::FrameOnly { .. } => "FRAME_ONLY",
+            Cover::Excluded { .. } => "EXCLUDED",
+            Cover::Expired { .. } => "EXPIRED",
+            Cover::NotStarted { .. } => "NOT_STARTED",
+            Cover::NotCovered => "NOT_APPROVED",
+            Cover::Missing { .. } => "NO_APPROVALS_FILE",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        let d = |n: i64| day(n * 86_400_000);
+        match self {
+            Cover::NotInUse => "approvals are not in use".to_string(),
+            Cover::Covered { pattern } => format!("approved ({pattern})"),
+            Cover::FrameOnly { pattern, until } => match until {
+                Some(u) => format!(
+                    "frame only ({pattern}, until {}): approved to write up, not to build",
+                    d(*u)
+                ),
+                None => format!("frame only ({pattern}): approved to write up, not to build"),
+            },
+            Cover::Excluded { pattern, by } => {
+                format!("excluded by {by} in the {pattern} approval")
+            }
+            Cover::Expired { pattern, until } => {
+                format!("approval expired {} ({pattern})", d(*until))
+            }
+            Cover::NotStarted { pattern, from } => {
+                format!("approval starts {} ({pattern})", d(*from))
+            }
+            Cover::NotCovered => "no owner approval covers it".to_string(),
+            Cover::Missing { source } => {
+                format!("the approvals file {source} does not exist, so nothing is approved")
+            }
+        }
+    }
 }
 
 fn bad(m: impl Into<String>) -> AitError {
     AitError::new("CONFIG", format!("approvals file: {}", m.into()))
 }
 
-pub fn load(path: Option<&Path>) -> Result<Approvals> {
-    let Some(p) = path else {
+pub fn load(src: Option<&Source>, repo: Option<&Path>) -> Result<Approvals> {
+    let Some(src) = src else {
         return Ok(Approvals::default());
     };
-    if !p.is_file() {
-        return Ok(Approvals::default());
+    match src.read(repo)? {
+        // Fail closed: a configured but missing file approves nothing.
+        None => Ok(Approvals {
+            list: Some(Vec::new()),
+            missing: Some(src.describe()),
+        }),
+        Some(text) => parse(&text),
     }
-    let text = std::fs::read_to_string(p)?;
-    parse(&text)
 }
 
 pub fn parse(text: &str) -> Result<Approvals> {
@@ -108,7 +181,10 @@ pub fn parse(text: &str) -> Result<Approvals> {
             exclude,
         });
     }
-    Ok(Approvals { list: Some(list) })
+    Ok(Approvals {
+        list: Some(list),
+        missing: None,
+    })
 }
 
 fn matches(pattern: &str, id: &str) -> bool {
@@ -122,24 +198,86 @@ impl Approvals {
         self.list.is_some()
     }
 
-    /// Whether an approval with scope `build` covers `id` on `today`.
-    pub fn covers(&self, id: &str, today: i64) -> bool {
+    /// Checks `id` for `scope` ("build" or "frame") on day number `today`.
+    /// A build approval also allows framing.
+    pub fn check(&self, id: &str, today: i64, scope: &str) -> Cover {
         let Some(list) = &self.list else {
-            return true;
+            return Cover::NotInUse;
         };
-        list.iter().any(|a| {
-            a.scope == "build"
-                && matches(&a.pattern, id)
-                && !a.exclude.iter().any(|x| matches(x, id))
-                && a.from.is_none_or(|f| today >= f)
-                && a.until.is_none_or(|u| today <= u)
-        })
+        if let Some(source) = &self.missing {
+            return Cover::Missing {
+                source: source.clone(),
+            };
+        }
+        let id = id.to_ascii_uppercase();
+        let scope_ok =
+            |a: &Approval| a.scope == "build" || (scope == "frame" && a.scope == "frame");
+        let relevant: Vec<&Approval> = list.iter().filter(|a| matches(&a.pattern, &id)).collect();
+        let excluded = |a: &Approval| a.exclude.iter().find(|x| matches(x, &id)).cloned();
+        let active =
+            |a: &Approval| a.from.is_none_or(|f| today >= f) && a.until.is_none_or(|u| today <= u);
+        if let Some(a) = relevant
+            .iter()
+            .find(|a| scope_ok(a) && active(a) && excluded(a).is_none())
+        {
+            return Cover::Covered {
+                pattern: a.pattern.clone(),
+            };
+        }
+        // Explain, most specific cause first.
+        for a in relevant.iter().filter(|a| scope_ok(a)) {
+            if let Some(by) = excluded(a) {
+                return Cover::Excluded {
+                    pattern: a.pattern.clone(),
+                    by,
+                };
+            }
+        }
+        if scope == "build"
+            && let Some(a) = relevant
+                .iter()
+                .find(|a| a.scope == "frame" && active(a) && excluded(a).is_none())
+        {
+            return Cover::FrameOnly {
+                pattern: a.pattern.clone(),
+                until: a.until,
+            };
+        }
+        for a in relevant.iter().filter(|a| scope_ok(a)) {
+            if let Some(u) = a.until
+                && today > u
+            {
+                return Cover::Expired {
+                    pattern: a.pattern.clone(),
+                    until: u,
+                };
+            }
+            if let Some(f) = a.from
+                && today < f
+            {
+                return Cover::NotStarted {
+                    pattern: a.pattern.clone(),
+                    from: f,
+                };
+            }
+        }
+        Cover::NotCovered
+    }
+
+    /// Whether a build approval covers `id` on `today`.
+    #[cfg(test)]
+    pub fn covers(&self, id: &str, today: i64) -> bool {
+        self.check(id, today, "build").ok()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn day_of(s: &str) -> i64 {
+        crate::time::parse_date(s).unwrap()
+    }
 
     #[test]
     fn absent_means_everything_approved() {
@@ -154,14 +292,46 @@ mod tests {
             r#"{"approvals":[{"match":"CORE-1","exclude":["CORE-1-05"],"until":"2026-12-31"},{"match":"PAP-2-01"}]}"#,
         )
         .unwrap();
-        let today = crate::time::parse_date("2026-11-26").unwrap();
+        let today = day_of("2026-11-26");
         assert!(a.covers("CORE-1-00", today));
         assert!(!a.covers("CORE-1-05", today));
         assert!(!a.covers("CORE-10-00", today));
         assert!(!a.covers("CORE-2-00", today));
         assert!(a.covers("PAP-2-01", today));
-        let later = crate::time::parse_date("2027-01-01").unwrap();
-        assert!(!a.covers("CORE-1-00", later));
+        assert!(!a.covers("CORE-1-00", day_of("2027-01-01")));
+    }
+
+    #[test]
+    fn explains_each_cause() {
+        // The owner's drive file, unchanged: lowercase, top-level array, notes.
+        let a = parse(
+            r#"[
+  {"match": "core", "scope": "build", "from": "2026-11-22", "until": "2026-12-31", "exclude": ["core-3-11"], "note": "x"},
+  {"match": "fw", "scope": "frame", "from": "2026-11-12", "until": null},
+  {"match": "bug", "scope": "build", "from": "2026-10-16", "until": "2026-11-01"},
+  {"match": "ms", "scope": "build", "from": "2026-12-01", "until": null}
+]"#,
+        )
+        .unwrap();
+        let t = day_of("2026-11-26");
+        assert_eq!(a.check("CORE-3-00", t, "build").code(), "APPROVED");
+        assert_eq!(a.check("CORE-3-11", t, "build").code(), "EXCLUDED");
+        assert_eq!(a.check("FW-1-00", t, "build").code(), "FRAME_ONLY");
+        assert_eq!(a.check("FW-1-00", t, "frame").code(), "APPROVED");
+        assert_eq!(a.check("CORE-3-00", t, "frame").code(), "APPROVED");
+        assert_eq!(a.check("BUG-40-00", t, "build").code(), "EXPIRED");
+        assert_eq!(a.check("MS-2-00", t, "build").code(), "NOT_STARTED");
+        assert_eq!(a.check("LOR-1-00", t, "build").code(), "NOT_APPROVED");
+        assert!(
+            a.check("BUG-40-00", t, "build")
+                .message()
+                .contains("2026-11-01")
+        );
+        assert!(
+            a.check("CORE-3-11", t, "build")
+                .message()
+                .contains("CORE-3-11")
+        );
     }
 
     #[test]

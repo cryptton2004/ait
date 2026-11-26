@@ -7,6 +7,81 @@
 use crate::error::{AitError, Result};
 use std::path::{Path, PathBuf};
 
+/// Where an owner-controlled file is read from: a path on disk, or a file
+/// committed in the repository (`git:<rev>:<path>`, e.g. `git:main:approvals.json`),
+/// so an uncommitted or branch-local edit changes nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Source {
+    File(PathBuf),
+    Git { rev: String, path: String },
+}
+
+impl Source {
+    fn parse(v: &str, dir: &Path) -> std::result::Result<Source, String> {
+        if let Some(rest) = v.strip_prefix("git:") {
+            let (rev, path) = rest
+                .split_once(':')
+                .ok_or_else(|| "use git:<branch>:<path in repo>".to_string())?;
+            let (rev, path) = (rev.trim(), path.trim().trim_start_matches('/'));
+            if rev.is_empty() || rev.starts_with('-') || path.is_empty() {
+                return Err("use git:<branch>:<path in repo>".to_string());
+            }
+            return Ok(Source::Git {
+                rev: rev.to_string(),
+                path: path.replace('\\', "/"),
+            });
+        }
+        Ok(Source::File(resolve(dir, v)))
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Source::File(p) => p.display().to_string(),
+            Source::Git { rev, path } => format!("git:{rev}:{path}"),
+        }
+    }
+
+    /// The file's text, or `None` if it does not exist (on disk or in `rev`).
+    pub fn read(&self, repo: Option<&Path>) -> Result<Option<String>> {
+        match self {
+            Source::File(p) => {
+                if !p.is_file() {
+                    return Ok(None);
+                }
+                Ok(Some(std::fs::read_to_string(p)?))
+            }
+            Source::Git { rev, path } => {
+                let repo = repo.ok_or_else(|| {
+                    AitError::new(
+                        "CONFIG",
+                        format!(
+                            "{} needs the repository: set repo = in default.cfg",
+                            self.describe()
+                        ),
+                    )
+                })?;
+                let out = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(["show", &format!("{rev}:{path}")])
+                    .output()
+                    .map_err(|e| AitError::new("CONFIG", format!("cannot run git: {e}")))?;
+                if out.status.success() {
+                    return Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()));
+                }
+                let err = String::from_utf8_lossy(&out.stderr);
+                if err.contains("does not exist") || err.contains("exists on disk, but not in") {
+                    return Ok(None);
+                }
+                Err(AitError::new(
+                    "CONFIG",
+                    format!("cannot read {}: {}", self.describe(), err.trim()),
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Explicit DB path; `None` means `<git-common-dir>/ait/tracker.db`.
@@ -19,7 +94,14 @@ pub struct Config {
     /// Daily backups to keep; 0 disables automatic backups.
     pub backup_keep: usize,
     /// Owner-only approvals file; `None` or missing file = approvals not used.
-    pub approvals: Option<PathBuf>,
+    pub approvals: Option<Source>,
+    /// Ids that were done before ait (count as merged for `check --git`).
+    pub git_baseline: Option<Source>,
+    /// The repository `check --git` and `git:` sources read; `None` = the
+    /// repository that holds the database.
+    pub repo: Option<PathBuf>,
+    /// Agent tiers in order (cheapest first) with the model each maps to.
+    pub agents: Vec<(String, String)>,
     pub port: u16,
     pub main_branch: String,
     pub trailer: String,
@@ -36,6 +118,9 @@ impl Default for Config {
             backup_dir: None,
             backup_keep: 14,
             approvals: None,
+            git_baseline: None,
+            repo: None,
+            agents: Vec::new(),
             port: 7777,
             main_branch: "main".to_string(),
             trailer: "Issue-ID".to_string(),
@@ -131,8 +216,32 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config> {
                 cfg.approvals = if v.is_empty() {
                     None
                 } else {
+                    Some(Source::parse(v, dir).map_err(|e| bad(&e))?)
+                }
+            }
+            "git_baseline" => {
+                cfg.git_baseline = if v.is_empty() {
+                    None
+                } else {
+                    Some(Source::parse(v, dir).map_err(|e| bad(&e))?)
+                }
+            }
+            "repo" => {
+                cfg.repo = if v.is_empty() || v == "auto" {
+                    None
+                } else {
                     Some(resolve(dir, v))
                 }
+            }
+            k if k.starts_with("agent.") => {
+                let tier = k["agent.".len()..].trim().to_ascii_lowercase();
+                if !valid_word(&tier) || v.is_empty() {
+                    return Err(bad("use agent.<tier> = <model>, e.g. agent.deep = opus"));
+                }
+                if cfg.agents.iter().any(|(t, _)| *t == tier) {
+                    return Err(bad(&format!("agent tier '{tier}' is set twice")));
+                }
+                cfg.agents.push((tier, v.to_string()));
             }
             "port" => cfg.port = v.parse().ok().ok_or_else(|| bad("port must be 0..65535"))?,
             "main_branch" => {
@@ -151,6 +260,36 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config> {
         }
     }
     Ok(cfg)
+}
+
+/// Lowercase word: letters, digits, `-`, `_`, 1-32 characters.
+pub fn valid_word(s: &str) -> bool {
+    (1..=32).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+impl Config {
+    /// The model configured for an agent tier.
+    pub fn model_for(&self, tier: &str) -> Option<&str> {
+        self.agents
+            .iter()
+            .find(|(t, _)| t == tier)
+            .map(|(_, m)| m.as_str())
+    }
+
+    /// The repository to read git data from: `repo =`, else the working
+    /// tree that owns the database's `.git` folder.
+    pub fn repo_dir(&self, db_path: &Path) -> Option<PathBuf> {
+        if let Some(r) = &self.repo {
+            return Some(r.clone());
+        }
+        db_path
+            .ancestors()
+            .find(|d| d.file_name().is_some_and(|n| n == ".git"))
+            .and_then(|g| g.parent())
+            .map(Path::to_path_buf)
+    }
 }
 
 /// Finds the repository's common git dir from `start` by reading `.git`
@@ -210,7 +349,39 @@ mod tests {
         assert!(c.db.is_none());
         assert_eq!(c.lease_minutes, 60);
         assert_eq!(c.backup_keep, 14);
-        assert_eq!(c.approvals, Some(Path::new("base").join("approvals.json")));
+        assert_eq!(
+            c.approvals,
+            Some(Source::File(Path::new("base").join("approvals.json")))
+        );
+    }
+
+    #[test]
+    fn sources_tiers_and_repo() {
+        let dir = Path::new("base");
+        let c = parse(
+            "approvals = git:main:docs/approvals.json\ngit_baseline = done.txt\nrepo = ..\nagent.light = haiku\nagent.deep = opus\n",
+            dir,
+        )
+        .unwrap();
+        assert_eq!(
+            c.approvals,
+            Some(Source::Git {
+                rev: "main".into(),
+                path: "docs/approvals.json".into()
+            })
+        );
+        assert_eq!(c.git_baseline, Some(Source::File(dir.join("done.txt"))));
+        assert_eq!(c.model_for("deep"), Some("opus"));
+        assert_eq!(c.agents[0].0, "light");
+        assert_eq!(c.repo_dir(Path::new("x/y.db")), Some(dir.join("..")));
+        assert!(parse("approvals = git:main", dir).is_err());
+        assert!(parse("agent.Deep Thought = x", dir).is_err());
+        let d = Config::default();
+        assert_eq!(
+            d.repo_dir(Path::new("C:/r/.git/ait/tracker.db")),
+            Some(PathBuf::from("C:/r"))
+        );
+        assert_eq!(d.repo_dir(Path::new("C:/tmp/t.db")), None);
     }
 
     #[test]

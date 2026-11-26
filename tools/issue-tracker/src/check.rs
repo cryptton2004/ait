@@ -1,29 +1,47 @@
-//! `ait check`: database integrity and consistency; `--git` adds the
-//! "done but not merged on main" check (one git call).
+//! `ait check`: database integrity and consistency. `--git` audits done
+//! issues against the merges on the main branch (one git call).
+//!
+//! The git audit is strict, like the factory's own trailer parser: only
+//! first-parent **merge** commits on `main_branch` of the configured `repo`
+//! count, and only a line `<trailer>: <ID>` (one id, nothing else) in the
+//! **last paragraph** of the message. Key and id compare case-insensitively.
+//! Ids listed in `git_baseline` (done before ait) count as merged.
 
 use crate::args::Args;
 use crate::claims;
 use crate::db::{self, Env};
-use crate::error::Result;
+use crate::error::{AitError, Result};
 use crate::ids;
-use crate::issues::{LINK_KINDS, NEEDS_REASON, STATES};
+use crate::issues::{EFFORTS, LINK_KINDS, NEEDS_REASON, PRIORITIES, STATES, TYPES};
 use crate::output::{Output, line, s};
 use rusqlite::Connection;
+use rusqlite::types::Value as Sql;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 fn problem(code: &str, issue: Option<&str>, message: String) -> Value {
     json!({"code": code, "issue": issue, "message": message})
 }
 
+/// Rows as optional strings (numbers are shown as text, so damaged rows
+/// are reported instead of failing the check).
 fn strings(c: &Connection, sql: &str) -> Result<Vec<Vec<Option<String>>>> {
     let mut st = c.prepare(sql)?;
     let n = st.column_count();
     let rows = st
         .query_map([], |r| {
             (0..n)
-                .map(|i| r.get::<_, Option<String>>(i))
+                .map(|i| {
+                    r.get::<_, Sql>(i).map(|v| match v {
+                        Sql::Null => None,
+                        Sql::Integer(x) => Some(x.to_string()),
+                        Sql::Real(x) => Some(x.to_string()),
+                        Sql::Text(t) => Some(t),
+                        Sql::Blob(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+                    })
+                })
                 .collect::<rusqlite::Result<Vec<_>>>()
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -72,39 +90,89 @@ fn find_cycle(edges: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
     None
 }
 
-fn git_trailers(env: &Env) -> std::result::Result<HashSet<String>, String> {
+/// Ids named by trailers in the last paragraph of a merge message.
+pub fn trailer_ids(message: &str, trailer: &str) -> Vec<String> {
+    let text = message.replace("\r\n", "\n");
+    let last = text
+        .trim()
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .last()
+        .unwrap_or("");
+    let mut out = Vec::new();
+    for l in last.lines() {
+        if let Some((k, v)) = l.split_once(':')
+            && k.trim_end() == k
+            && k.eq_ignore_ascii_case(trailer)
+        {
+            let id = v.trim().to_ascii_uppercase();
+            if ids::is_id(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+/// Merged ids (id -> merge sha) from first-parent merges of `rev` in `repo`.
+fn git_merged(
+    repo: &Path,
+    rev: &str,
+    trailer: &str,
+) -> std::result::Result<HashMap<String, String>, String> {
     let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
         .args([
             "log",
             "--first-parent",
-            "--format=%B%x1e",
-            &env.cfg.main_branch,
+            "--merges",
+            "--format=%H%x00%B%x1e",
+            rev,
             "--",
         ])
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "git log {} failed: {}",
-            env.cfg.main_branch,
+            "git -C {} log {rev} failed: {}",
+            repo.display(),
             line(&String::from_utf8_lossy(&out.stderr), 200)
         ));
     }
-    let key = env.cfg.trailer.to_ascii_lowercase();
-    let mut ids = HashSet::new();
-    for l in String::from_utf8_lossy(&out.stdout).lines() {
-        if let Some((k, v)) = l.trim().split_once(':')
-            && k.trim().to_ascii_lowercase() == key
-        {
-            for id in v.split(',') {
-                ids.insert(id.trim().to_ascii_uppercase());
-            }
+    let mut merged = HashMap::new();
+    for rec in String::from_utf8_lossy(&out.stdout).split('\u{1e}') {
+        let Some((sha, msg)) = rec.trim_start().split_once('\0') else {
+            continue;
+        };
+        for id in trailer_ids(msg, trailer) {
+            merged.entry(id).or_insert_with(|| sha.trim().to_string());
         }
     }
-    Ok(ids)
+    Ok(merged)
 }
 
-pub fn run_checks(c: &Connection, env: &Env, git: bool) -> Result<(Vec<Value>, i64)> {
+fn repo_for(env: &Env, explicit: Option<&str>) -> Result<PathBuf> {
+    if let Some(r) = explicit {
+        return Ok(PathBuf::from(r));
+    }
+    env.cfg.repo_dir(&env.db_path).ok_or_else(|| {
+        AitError::new(
+            "CONFIG",
+            "check --git needs the repository: set repo = in default.cfg or pass --repo <path>",
+        )
+    })
+}
+
+pub struct Checks {
+    pub git: bool,
+    pub repo: Option<PathBuf>,
+    /// Include the approvals file (not wanted when validating an import).
+    pub approvals: bool,
+}
+
+pub fn run_checks(c: &Connection, env: &Env, opt: &Checks) -> Result<(Vec<Value>, i64)> {
     let mut p = Vec::new();
     let integrity: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
     if integrity != "ok" {
@@ -116,10 +184,15 @@ pub fn run_checks(c: &Connection, env: &Env, git: bool) -> Result<(Vec<Value>, i
     }
     let issues = strings(
         c,
-        "SELECT id, state, reason, parent, legacy FROM issues ORDER BY id",
+        "SELECT id, state, reason, parent, legacy, type, priority, effort, release FROM issues ORDER BY id",
     )?;
     let all: HashSet<String> = issues.iter().filter_map(|r| r[0].clone()).collect();
+    let kind_of: HashMap<String, String> = issues
+        .iter()
+        .filter_map(|r| Some((r[0].clone()?, r[5].clone().unwrap_or_default())))
+        .collect();
     let mut parents: HashMap<String, String> = HashMap::new();
+    let mut legacy_seen: HashMap<String, String> = HashMap::new();
     for r in &issues {
         let id = r[0].clone().unwrap_or_default();
         let state = r[1].clone().unwrap_or_default();
@@ -127,7 +200,7 @@ pub fn run_checks(c: &Connection, env: &Env, git: bool) -> Result<(Vec<Value>, i
             p.push(problem(
                 "BAD_ID",
                 Some(&id),
-                format!("'{id}' does not match PREFIX-N-NN"),
+                format!("'{id}' does not match PREFIX-N-NN (uppercase)"),
             ));
         }
         if !STATES.contains(&state.as_str()) {
@@ -155,6 +228,58 @@ pub fn run_checks(c: &Connection, env: &Env, git: bool) -> Result<(Vec<Value>, i
                 ));
             }
             parents.insert(id.clone(), par.clone());
+        }
+        if let Some(l) = &r[4] {
+            let key = l.to_lowercase();
+            if let Some(other) = legacy_seen.get(&key) {
+                p.push(problem(
+                    "LEGACY_DUP",
+                    Some(&id),
+                    format!("legacy alias '{l}' is also used by {other}"),
+                ));
+            } else {
+                legacy_seen.insert(key, id.clone());
+            }
+        }
+        let kind = r[5].clone().unwrap_or_default();
+        if !TYPES.contains(&kind.as_str()) {
+            p.push(problem(
+                "BAD_TYPE",
+                Some(&id),
+                format!("unknown type '{kind}'"),
+            ));
+        }
+        let prio = r[6].clone().unwrap_or_default();
+        if !PRIORITIES.contains(&prio.as_str()) {
+            p.push(problem(
+                "BAD_PRIORITY",
+                Some(&id),
+                format!("unknown priority '{prio}'"),
+            ));
+        }
+        if let Some(e) = &r[7]
+            && !EFFORTS.contains(&e.as_str())
+        {
+            p.push(problem(
+                "BAD_EFFORT",
+                Some(&id),
+                format!("unknown effort '{e}'"),
+            ));
+        }
+        if let Some(rel) = &r[8] {
+            match kind_of.get(rel).map(String::as_str) {
+                None => p.push(problem(
+                    "MISSING_RELEASE",
+                    Some(&id),
+                    format!("release {rel} does not exist"),
+                )),
+                Some("release" | "milestone") => {}
+                Some(k) => p.push(problem(
+                    "BAD_RELEASE",
+                    Some(&id),
+                    format!("release {rel} is a {k}, not a release or milestone"),
+                )),
+            }
         }
     }
     for id in parents.keys() {
@@ -189,6 +314,9 @@ pub fn run_checks(c: &Connection, env: &Env, git: bool) -> Result<(Vec<Value>, i
                 format!("unknown link kind '{kind}'"),
             ));
         }
+        if src == dst {
+            p.push(problem("CYCLE", Some(&src), format!("{src} {kind} itself")));
+        }
         for end in [&src, &dst] {
             if !all.contains(end) {
                 p.push(problem(
@@ -198,7 +326,7 @@ pub fn run_checks(c: &Connection, env: &Env, git: bool) -> Result<(Vec<Value>, i
                 ));
             }
         }
-        if kind == "needs" {
+        if kind == "needs" && src != dst {
             needs.entry(src).or_default().push(dst);
         }
     }
@@ -239,35 +367,114 @@ pub fn run_checks(c: &Connection, env: &Env, git: bool) -> Result<(Vec<Value>, i
             format!("notes for missing issue {id}"),
         ));
     }
-    if let Err(e) = claims::load_approvals(env) {
+    if opt.approvals
+        && let Err(e) = claims::load_approvals(env)
+    {
         p.push(problem("APPROVALS", None, e.message));
     }
-    if git {
-        match git_trailers(env) {
-            Err(e) => p.push(problem("GIT", None, e)),
-            Ok(merged) => {
-                for r in strings(c, "SELECT id FROM issues WHERE state = 'done' ORDER BY id")? {
-                    let id = r[0].clone().unwrap_or_default();
-                    if !merged.contains(&id) {
+    if opt.git {
+        git_checks(c, env, opt.repo.as_deref(), &mut p)?;
+    }
+    Ok((p, i64::try_from(all.len()).unwrap_or(0)))
+}
+
+fn git_checks(c: &Connection, env: &Env, repo: Option<&Path>, p: &mut Vec<Value>) -> Result<()> {
+    let repo = repo
+        .map(Path::to_path_buf)
+        .or_else(|| env.cfg.repo_dir(&env.db_path));
+    let Some(repo) = repo else {
+        p.push(problem(
+            "GIT",
+            None,
+            "check --git needs the repository: set repo = in default.cfg or pass --repo <path>"
+                .to_string(),
+        ));
+        return Ok(());
+    };
+    let merged = match git_merged(&repo, &env.cfg.main_branch, &env.cfg.trailer) {
+        Ok(m) => m,
+        Err(e) => {
+            p.push(problem("GIT", None, e));
+            return Ok(());
+        }
+    };
+    let mut baseline: HashSet<String> = HashSet::new();
+    if let Some(src) = &env.cfg.git_baseline {
+        match src.read(Some(&repo))? {
+            None => p.push(problem(
+                "BASELINE",
+                None,
+                format!("git_baseline {} does not exist", src.describe()),
+            )),
+            Some(text) => {
+                for l in text.lines() {
+                    let l = l.trim();
+                    if l.is_empty() || l.starts_with('#') {
+                        continue;
+                    }
+                    let id = l.to_ascii_uppercase();
+                    if ids::is_id(&id) {
+                        baseline.insert(id);
+                    } else {
                         p.push(problem(
-                            "DONE_NOT_MERGED",
-                            Some(&id),
-                            format!(
-                                "{id} is done but no commit on {} carries `{}: {id}`",
-                                env.cfg.main_branch, env.cfg.trailer
-                            ),
+                            "BASELINE",
+                            None,
+                            format!("baseline line '{l}' is not an id"),
                         ));
                     }
                 }
             }
         }
     }
-    Ok((p, i64::try_from(all.len()).unwrap_or(0)))
+    let states: HashMap<String, String> = strings(c, "SELECT id, state FROM issues ORDER BY id")?
+        .into_iter()
+        .filter_map(|r| Some((r[0].clone()?, r[1].clone().unwrap_or_default())))
+        .collect();
+    let mut ids: Vec<&String> = states.keys().collect();
+    ids.sort();
+    for id in ids {
+        let state = &states[id];
+        let up = id.to_ascii_uppercase();
+        let is_merged = merged.contains_key(&up) || baseline.contains(&up);
+        if state == "done" && !is_merged {
+            p.push(problem(
+                "DONE_NOT_MERGED",
+                Some(id),
+                format!(
+                    "{id} is done but no first-parent merge on {} carries `{}: {id}` (and it is not in the baseline)",
+                    env.cfg.main_branch, env.cfg.trailer
+                ),
+            ));
+        }
+        if state != "done"
+            && let Some(sha) = merged.get(&up)
+        {
+            p.push(problem(
+                "MERGED_NOT_DONE",
+                Some(id),
+                format!(
+                    "{id} was merged in {} but is {state}; run `ait done {id} --force --summary ...`",
+                    &sha[..sha.len().min(12)]
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn cmd_check(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["git"], 0)?;
-    let (problems, n) = db::read(c, |c| run_checks(c, env, a.flag("git")))?;
+    a.expect(&["git", "repo"], 0)?;
+    let repo = if a.flag("git") {
+        Some(repo_for(env, a.opt("repo")).ok()).flatten()
+    } else {
+        None
+    };
+    let opt = Checks {
+        git: a.flag("git"),
+        repo,
+        approvals: true,
+    };
+    let (problems, n) = db::read(c, |c| run_checks(c, env, &opt))?;
     let ok = problems.is_empty();
     let mut text = if ok {
         format!("ok: {n} issues, no problems")
@@ -298,5 +505,36 @@ mod tests {
         let c = find_cycle(&e).unwrap();
         assert_eq!(c.first(), c.last());
         assert_eq!(c.len(), 4);
+    }
+
+    #[test]
+    fn strict_trailers() {
+        let t = "Backlog-ID";
+        // Only the last paragraph, one id per line, exact key.
+        assert_eq!(
+            trailer_ids("Merge x\n\nBacklog-ID: core-3-10", t),
+            vec!["CORE-3-10"]
+        );
+        assert_eq!(
+            trailer_ids("Merge x\n\nbacklog-id: CORE-3-10\r\n", t),
+            vec!["CORE-3-10"]
+        );
+        assert!(
+            trailer_ids(
+                "Merge\n\nBacklog-ID: core-3-10\nwas mentioned as prose\n\nlast para",
+                t
+            )
+            .is_empty()
+        );
+        assert!(trailer_ids("Merge\n\nBacklog-ID: bug-40-00, core-100-00", t).is_empty());
+        assert!(trailer_ids("Merge\n\nX-Backlog-ID: core-1-00", t).is_empty());
+        assert!(trailer_ids("Merge\n\nBacklog-ID : core-1-00", t).is_empty());
+        assert_eq!(
+            trailer_ids(
+                "Merge\n\nSigned-off-by: a\nBacklog-ID: core-1-00\nBacklog-ID: core-1-01",
+                t
+            ),
+            vec!["CORE-1-00", "CORE-1-01"]
+        );
     }
 }

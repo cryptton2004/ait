@@ -236,10 +236,32 @@ fn release_and_done_rules() {
     assert_eq!(id(&v), "CORE-1-00");
     assert_eq!(v["claim"]["generation"], 2);
     assert_eq!(t.err_at(Some("a2"), T0, &["done", "CORE-1-00"]).1, "USAGE");
+    // Done needs the generation of the live claim (owner rule, 2026-11-26).
+    assert_eq!(
+        t.err_at(Some("a2"), T0, &["done", "CORE-1-00", "--summary", "x"])
+            .1,
+        "USAGE"
+    );
+    assert_eq!(
+        t.err_at(
+            Some("a2"),
+            T0,
+            &["done", "CORE-1-00", "--summary", "x", "--gen", "1"]
+        )
+        .1,
+        "STALE_GENERATION"
+    );
     let v = t.ok_at(
         Some("a2"),
         T0,
-        &["done", "CORE-1-00", "--summary", "delivered X"],
+        &[
+            "done",
+            "CORE-1-00",
+            "--summary",
+            "delivered X",
+            "--gen",
+            "2",
+        ],
     );
     assert_eq!(v["issue"]["state"], "done");
     assert_eq!(v["issue"]["summary"], "delivered X");
@@ -254,11 +276,22 @@ fn release_and_done_rules() {
     );
     let show = t.ok_at(None, T0, &["show", "CORE-1-00"]);
     assert_eq!(show["claim"]["status"], "released");
-    // Owner can close an unclaimed issue directly.
+    // Closing an unclaimed issue needs --force (owner rule, 2026-11-26).
+    assert_eq!(
+        t.err_at(None, T0, &["done", "CORE-1-01", "--summary", "closed"])
+            .1,
+        "NOT_CLAIMED"
+    );
     t.ok_at(
         None,
         T0,
-        &["done", "CORE-1-01", "--summary", "closed by owner"],
+        &[
+            "done",
+            "CORE-1-01",
+            "--summary",
+            "closed by owner",
+            "--force",
+        ],
     );
 }
 

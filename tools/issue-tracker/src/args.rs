@@ -19,6 +19,9 @@ const BOOL_FLAGS: &[&str] = &[
     "top",
     "bottom",
     "git",
+    "frame",
+    "issues",
+    "tree",
     "help",
 ];
 

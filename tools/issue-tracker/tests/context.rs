@@ -33,8 +33,17 @@ fn notes_are_append_only_and_handoffs_are_versioned() {
     assert!(h["handoff"]["body"].as_str().unwrap().starts_with("v2"));
     let v = t.ok(None, &["show", "CORE-1-00", "--notes", "1"]);
     assert_eq!(v["notes"].as_array().unwrap().len(), 1);
-    // Non-claimants can still note (generation is left empty).
-    let n = t.ok(Some("owner"), &["note", "CORE-1-00", "owner comment"]);
+    // A non-claimant's note is refused while the claim is live (owner rule,
+    // 2026-11-26); --force records it with an empty generation.
+    assert_eq!(
+        t.err(Some("owner"), &["note", "CORE-1-00", "owner comment"])
+            .1,
+        "NOT_CLAIMANT"
+    );
+    let n = t.ok(
+        Some("owner"),
+        &["note", "CORE-1-00", "owner comment", "--force"],
+    );
     assert_eq!(n["note"]["generation"], serde_json::Value::Null);
     assert_eq!(t.err(None, &["note", "CORE-1-00", "  "]).1, "INVALID_INPUT");
     assert_eq!(t.err(None, &["note", "CORE-1-00"]).1, "USAGE");
@@ -109,7 +118,10 @@ fn export_import_round_trip_is_byte_for_byte() {
     t.ok(Some("a1"), &["claim", "CORE-1-00"]);
     t.ok(Some("a1"), &["note", "CORE-1-00", "a note"]);
     t.ok(Some("a1"), &["handoff", "CORE-1-00", "a handoff"]);
-    t.ok(Some("a1"), &["done", "CORE-1-00", "--summary", "shipped"]);
+    t.ok(
+        Some("a1"),
+        &["done", "CORE-1-00", "--summary", "shipped", "--gen", "1"],
+    );
     t.ok(None, &["add", "CORE", "deleted"]);
     t.ok(None, &["delete", "CORE-1-02"]);
     let a = t.path("a.jsonl");
@@ -141,13 +153,14 @@ fn export_import_round_trip_is_byte_for_byte() {
     // Importing into a used database is refused.
     let o = run(&restored, &["import", &p(&a)]);
     assert_eq!((o.code, err_code(&o.json).as_str()), (4, "NOT_EMPTY"));
-    // Garbage is refused with a line number.
+    // Garbage is refused with a line number; every problem is listed
+    // (IMPORT_INVALID since the owner's 2026-11-26 report).
     let bad = t.write(
         "bad.jsonl",
         "{\"type\":\"ait-export\",\"format\":1,\"schema\":1}\n{\"type\":\"wat\"}\n",
     );
     let o = run(&t.path("other.db"), &["import", &p(&bad)]);
-    assert_eq!(err_code(&o.json), "INVALID_INPUT");
+    assert_eq!(err_code(&o.json), "IMPORT_INVALID");
     assert!(
         o.json["error"]["message"]
             .as_str()
@@ -257,12 +270,39 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
+/// Merges a branch with one commit into main with `--no-ff` and `message`.
+fn merge(repo: &std::path::Path, branch: &str, message: &str) {
+    git(repo, &["checkout", "-q", "-b", branch]);
+    git(repo, &["commit", "-q", "--allow-empty", "-m", "work"]);
+    git(repo, &["checkout", "-q", "main"]);
+    git(repo, &["merge", "-q", "--no-ff", branch, "-m", message]);
+}
+
+/// Owner repro (2026-11-26): only real trailers on first-parent merges of
+/// the configured repo count, and a baseline covers issues done before.
 #[test]
-fn check_git_flags_done_issues_without_a_merge_on_main() {
+fn check_git_reads_only_merge_trailers_of_the_configured_repo() {
     let t = T::new("checkgit");
     let repo = t.path("repo");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.join("baseline.txt"),
+        "# done before the switch
+CORE-1-03
+",
+    )
+    .unwrap();
+    git(&repo, &["add", "baseline.txt"]);
+    git(&repo, &["commit", "-q", "-m", "baseline"]);
+    merge(
+        &repo,
+        "f0",
+        "Add parser
+
+Issue-ID: CORE-1-00",
+    );
+    // A plain commit on main is not a merge.
     git(
         &repo,
         &[
@@ -270,38 +310,80 @@ fn check_git_flags_done_issues_without_a_merge_on_main() {
             "-q",
             "--allow-empty",
             "-m",
-            "Add parser\n\nIssue-ID: CORE-1-00",
+            "Direct
+
+Issue-ID: CORE-1-01",
         ],
     );
-    let db = t.path("t.db");
+    // A key: value line that is not in the trailer block does not count.
+    merge(
+        &repo,
+        "f2",
+        "Mentions
+
+Issue-ID: CORE-1-02
+is how we tag
+
+Signed-off-by: x",
+    );
+    merge(
+        &repo,
+        "f4",
+        "Ready item
+
+Issue-ID: CORE-1-04",
+    );
+    let cfg = t.write(
+        "git.cfg",
+        "repo = repo
+git_baseline = git:main:baseline.txt
+backup_keep = 0
+",
+    );
+    // Run from a directory that is not the repo.
     let run = |args: &[&str]| {
-        let mut c = t.bare();
-        c.current_dir(&repo)
-            .arg("--db")
-            .arg(&db)
-            .arg("--json")
-            .args(args);
+        let mut c = t.cmd(None, &[]);
+        c.arg("--config").arg(&cfg).args(args);
         t.exec(c)
     };
-    run(&["add", "CORE", "merged"]);
-    run(&["add", "CORE", "not merged"]);
-    run(&["done", "CORE-1-00", "--summary", "ok"]);
-    run(&["done", "CORE-1-01", "--summary", "claimed done"]);
+    for title in ["merged", "direct", "loose", "baseline", "ready"] {
+        assert_eq!(run(&["add", "CORE", title]).code, 0);
+    }
+    for id in ["CORE-1-00", "CORE-1-01", "CORE-1-02", "CORE-1-03"] {
+        let o = run(&["done", id, "--summary", "ok", "--force"]);
+        assert_eq!(o.code, 0, "{}", o.stdout);
+    }
     let o = run(&["check", "--git"]);
     assert_eq!(o.code, 7, "{}", o.stdout);
-    let probs = o.json["problems"].as_array().unwrap();
-    assert_eq!(probs.len(), 1, "{probs:?}");
-    assert_eq!(probs[0]["code"], "DONE_NOT_MERGED");
-    assert_eq!(probs[0]["issue"], "CORE-1-01");
-    git(
-        &repo,
-        &[
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Finish\n\nIssue-ID: CORE-1-01",
-        ],
-    );
-    assert_eq!(run(&["check", "--git"]).code, 0);
+    let mut got: Vec<(String, String)> = o.json["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["code"].as_str().unwrap().to_string(),
+                p["issue"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    let want = [
+        ("DONE_NOT_MERGED", "CORE-1-01"),
+        ("DONE_NOT_MERGED", "CORE-1-02"),
+        ("MERGED_NOT_DONE", "CORE-1-04"),
+    ];
+    let want: Vec<(String, String)> = want
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    assert_eq!(got, want);
+    // --repo overrides the configured repo; a folder with no repo is a problem.
+    let o = run(&[
+        "check",
+        "--git",
+        "--repo",
+        t.path("nowhere").to_str().unwrap(),
+    ]);
+    assert_eq!(o.code, 7);
+    assert_eq!(o.json["problems"][0]["code"], "GIT");
 }

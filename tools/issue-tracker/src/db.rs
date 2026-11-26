@@ -76,6 +76,19 @@ pub const MIGRATIONS: &[&str] = &[
     CREATE INDEX events_issue ON events(issue, seq);
     CREATE INDEX events_at ON events(at);
     ",
+    // 2: issue type, priority, recommended agent, release membership, what ran
+    "
+    ALTER TABLE issues ADD COLUMN type TEXT NOT NULL DEFAULT 'task';
+    ALTER TABLE issues ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2';
+    ALTER TABLE issues ADD COLUMN agent TEXT;
+    ALTER TABLE issues ADD COLUMN effort TEXT;
+    ALTER TABLE issues ADD COLUMN reviewer TEXT;
+    ALTER TABLE issues ADD COLUMN release TEXT;
+    ALTER TABLE issues ADD COLUMN ran TEXT;
+    CREATE INDEX issues_parent ON issues(parent);
+    CREATE INDEX issues_release ON issues(release);
+    CREATE INDEX issues_prio ON issues(priority, ord);
+    ",
 ];
 
 pub fn schema_version() -> i64 {
@@ -270,8 +283,10 @@ pub fn touch_session(conn: &Connection, env: &Env) -> Result<()> {
             params![s, machine, env.now],
         )?;
         c.execute(
-            "UPDATE claims SET lease_until = ?2 WHERE session = ?1",
-            params![s, env.now + env.lease_ms()],
+            // Only live leases: an expired claim stays stale until the
+            // session claims it again (or another session takes it over).
+            "UPDATE claims SET lease_until = ?2 WHERE session = ?1 AND lease_until > ?3",
+            params![s, env.now + env.lease_ms(), env.now],
         )?;
         Ok(())
     })

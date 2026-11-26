@@ -2,15 +2,17 @@
 
 use crate::args::Args;
 use crate::claims;
+use crate::config::{Config, valid_word};
 use crate::db::{self, Env};
 use crate::error::{AitError, Result};
 use crate::ids;
 use crate::notes;
 use crate::output::{Output, line, s};
+use crate::roadmap;
 use crate::time::{iso, iso_opt};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 pub const STATES: &[&str] = &[
@@ -18,11 +20,17 @@ pub const STATES: &[&str] = &[
 ];
 pub const NEEDS_REASON: &[&str] = &["blocked", "decision", "dropped"];
 pub const LINK_KINDS: &[&str] = &["needs", "relates", "discovered_from"];
+/// Issue types. Releases and milestones can be the `release` of other issues.
+pub const TYPES: &[&str] = &["task", "feature", "milestone", "release"];
+pub const PRIORITIES: &[&str] = &["P0", "P1", "P2", "P3", "P4"];
+pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 const MAX_TITLE: usize = 300;
 const MAX_BODY: usize = 1_000_000;
 
-pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at";
+pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at, type, priority, agent, effort, reviewer, release, ran";
+/// Number of columns in `COLS` (extra joined columns start at this index).
+pub const NCOLS: usize = 22;
 
 pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -41,7 +49,47 @@ pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
         "created_at": iso(r.get::<_, i64>(12)?),
         "updated_at": iso(r.get::<_, i64>(13)?),
         "done_at": iso_opt(r.get::<_, Option<i64>>(14)?),
+        "type": r.get::<_, String>(15)?,
+        "priority": r.get::<_, String>(16)?,
+        "agent": r.get::<_, Option<String>>(17)?,
+        "effort": r.get::<_, Option<String>>(18)?,
+        "reviewer": r.get::<_, Option<String>>(19)?,
+        "release": r.get::<_, Option<String>>(20)?,
+        "ran": r.get::<_, Option<String>>(21)?,
     }))
+}
+
+/// Adds `agent_model`: the model the configured tier maps to.
+pub fn with_model(mut v: Value, cfg: &Config) -> Value {
+    let model = v
+        .get("agent")
+        .and_then(Value::as_str)
+        .and_then(|t| cfg.model_for(t))
+        .map(str::to_string);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("agent_model".to_string(), json!(model));
+    }
+    v
+}
+
+/// One line describing the recommended agent: `agent: deep (opus), effort high, reviewer codex`.
+pub fn agent_line(i: &Value) -> String {
+    let mut parts = Vec::new();
+    if !s(i, "agent").is_empty() {
+        let model = s(i, "agent_model");
+        if model.is_empty() {
+            parts.push(format!("agent: {}", s(i, "agent")));
+        } else {
+            parts.push(format!("agent: {} ({model})", s(i, "agent")));
+        }
+    }
+    if !s(i, "effort").is_empty() {
+        parts.push(format!("effort {}", s(i, "effort")));
+    }
+    if !s(i, "reviewer").is_empty() {
+        parts.push(format!("reviewer {}", line(s(i, "reviewer"), 40)));
+    }
+    parts.join(", ")
 }
 
 pub fn exists(c: &Connection, id: &str) -> Result<bool> {
@@ -81,13 +129,18 @@ pub fn get(c: &Connection, id: &str) -> Result<Value> {
         .ok_or_else(|| AitError::not_found(id))
 }
 
+/// The issue with `agent_model` resolved from the config.
+pub fn get_full(c: &Connection, cfg: &Config, id: &str) -> Result<Value> {
+    Ok(with_model(get(c, id)?, cfg))
+}
+
 pub fn state_of(c: &Connection, id: &str) -> Result<String> {
     c.query_row("SELECT state FROM issues WHERE id = ?1", [id], |r| r.get(0))
         .optional()?
         .ok_or_else(|| AitError::not_found(id))
 }
 
-fn check_title(t: &str) -> Result<String> {
+pub fn check_title(t: &str) -> Result<String> {
     let t = t.trim();
     if t.is_empty() {
         return Err(AitError::new("INVALID_INPUT", "title must not be empty"));
@@ -147,6 +200,96 @@ pub fn check_state(state: &str, reason: Option<&str>) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub fn check_type(t: &str) -> Result<()> {
+    if TYPES.contains(&t) {
+        Ok(())
+    } else {
+        Err(AitError::new(
+            "INVALID_INPUT",
+            format!("unknown type '{t}' (use {})", TYPES.join(", ")),
+        ))
+    }
+}
+
+pub fn check_priority(p: &str) -> Result<()> {
+    if PRIORITIES.contains(&p) {
+        Ok(())
+    } else {
+        Err(AitError::new(
+            "INVALID_INPUT",
+            format!("unknown priority '{p}' (use P0 most urgent .. P4)"),
+        ))
+    }
+}
+
+pub fn check_effort(e: &str) -> Result<()> {
+    if EFFORTS.contains(&e) {
+        Ok(())
+    } else {
+        Err(AitError::new(
+            "INVALID_INPUT",
+            format!("unknown effort '{e}' (use {})", EFFORTS.join(", ")),
+        ))
+    }
+}
+
+/// An agent tier: one of the configured `agent.<tier>` keys, or any short
+/// lowercase word when no tiers are configured.
+pub fn check_agent(a: &str, cfg: &Config) -> Result<()> {
+    if cfg.agents.is_empty() {
+        if valid_word(a) {
+            return Ok(());
+        }
+        return Err(AitError::new(
+            "INVALID_INPUT",
+            format!("agent '{a}' must be a short lowercase word such as deep or standard"),
+        ));
+    }
+    if cfg.model_for(a).is_some() {
+        Ok(())
+    } else {
+        let tiers: Vec<&str> = cfg.agents.iter().map(|(t, _)| t.as_str()).collect();
+        Err(AitError::new(
+            "INVALID_INPUT",
+            format!(
+                "unknown agent tier '{a}' (configured: {})",
+                tiers.join(", ")
+            ),
+        ))
+    }
+}
+
+pub fn check_reviewer(r: &str) -> Result<()> {
+    if r.is_empty() || r.chars().count() > 64 || r.contains('\n') {
+        Err(AitError::new(
+            "INVALID_INPUT",
+            "reviewer must be one line of at most 64 characters",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// `release` must point at an issue whose type is release or milestone.
+fn check_release_target(c: &Connection, target: &str) -> Result<()> {
+    let kind: String = c.query_row("SELECT type FROM issues WHERE id = ?1", [target], |r| {
+        r.get(0)
+    })?;
+    if kind == "release" || kind == "milestone" {
+        Ok(())
+    } else {
+        Err(AitError::new(
+            "INVALID_INPUT",
+            format!("{target} is a {kind}; --release must point at a release or milestone"),
+        ))
+    }
+}
+
+/// Lowercase option value, trimmed; `""` means "clear the field".
+fn lower_opt(a: &Args, name: &str) -> Option<String> {
+    a.opt(name).map(|v| v.trim().to_ascii_lowercase())
 }
 
 fn id_list(c: &Connection, v: Option<&str>) -> Result<Vec<String>> {
@@ -267,7 +410,7 @@ fn reaches(c: &Connection, from: &str, target: &str) -> Result<bool> {
     Ok(hit.is_some())
 }
 
-fn add_link(c: &Connection, src: &str, kind: &str, dst: &str) -> Result<bool> {
+pub fn add_link(c: &Connection, src: &str, kind: &str, dst: &str) -> Result<bool> {
     if src == dst {
         return Err(AitError::new(
             "CYCLE",
@@ -395,6 +538,49 @@ fn legacy_free(c: &Connection, legacy: &str, except: &str) -> Result<()> {
 
 // ---------------------------------------------------------------- commands
 
+/// Validated values of the per-issue planning fields given as options.
+struct Fields {
+    kind: Option<String>,
+    priority: Option<String>,
+    agent: Option<String>,
+    effort: Option<String>,
+    reviewer: Option<String>,
+}
+
+fn read_fields(a: &Args, cfg: &Config) -> Result<Fields> {
+    let kind = lower_opt(a, "type");
+    if let Some(k) = &kind {
+        check_type(k)?;
+    }
+    let priority = a.opt("priority").map(|p| p.trim().to_ascii_uppercase());
+    if let Some(p) = &priority {
+        check_priority(p)?;
+    }
+    let agent = lower_opt(a, "agent");
+    if let Some(x) = agent.as_deref().filter(|x| !x.is_empty()) {
+        check_agent(x, cfg)?;
+    }
+    let effort = lower_opt(a, "effort");
+    if let Some(x) = effort.as_deref().filter(|x| !x.is_empty()) {
+        check_effort(x)?;
+    }
+    let reviewer = a.opt("reviewer").map(|r| r.trim().to_string());
+    if let Some(x) = reviewer.as_deref().filter(|x| !x.is_empty()) {
+        check_reviewer(x)?;
+    }
+    Ok(Fields {
+        kind,
+        priority,
+        agent,
+        effort,
+        reviewer,
+    })
+}
+
+fn none_if_empty(v: Option<String>) -> Option<String> {
+    v.filter(|x| !x.is_empty())
+}
+
 pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     a.expect(
         &[
@@ -409,6 +595,12 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "legacy",
             "needs",
             "discovered-from",
+            "type",
+            "priority",
+            "agent",
+            "effort",
+            "reviewer",
+            "release",
         ],
         2,
     )?;
@@ -424,9 +616,14 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     }
     check_state(state, a.opt("reason"))?;
     let reason = a.opt("reason").filter(|r| !r.trim().is_empty());
+    let f = read_fields(a, &env.cfg)?;
     let issue = db::write(c, |c| {
         let after = a.opt("after").map(|x| resolve(c, x)).transpose()?;
         let parent = a.opt("parent").map(|x| resolve(c, x)).transpose()?;
+        let release = a.opt("release").map(|x| resolve(c, x)).transpose()?;
+        if let Some(r) = &release {
+            check_release_target(c, r)?;
+        }
         let needs = id_list(c, a.opt("needs"))?;
         let disc = a
             .opt("discovered-from")
@@ -444,8 +641,9 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         let ord = place(c, &pos, None)?;
         c.execute(
             "INSERT INTO issues (id, title, body, state, reason, ord, size, spec, parent, legacy,
-                                 version, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?11)",
+                                 version, created_at, updated_at, type, priority, agent, effort,
+                                 reviewer, release)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 id,
                 title,
@@ -457,7 +655,13 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 a.opt("spec"),
                 parent,
                 legacy,
-                env.now
+                env.now,
+                f.kind.as_deref().unwrap_or("task"),
+                f.priority.as_deref().unwrap_or("P2"),
+                none_if_empty(f.agent.clone()),
+                none_if_empty(f.effort.clone()),
+                none_if_empty(f.reviewer.clone()),
+                release,
             ],
         )?;
         for n in &needs {
@@ -473,7 +677,7 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "add",
             json!({"title": title, "state": state, "needs": needs, "discovered_from": disc}),
         )?;
-        get(c, &id)
+        get_full(c, &env.cfg, &id)
     })?;
     let text = format!(
         "added {}  {}",
@@ -494,6 +698,14 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "parent",
             "legacy",
             "version",
+            "type",
+            "priority",
+            "agent",
+            "effort",
+            "reviewer",
+            "release",
+            "force",
+            "gen",
         ],
         1,
     )?;
@@ -501,11 +713,16 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     let title = a.opt("title").map(check_title).transpose()?;
     let body = read_text(a, "body")?;
     let expected = a.opt_i64("version")?;
+    let want = a.opt_i64("gen")?;
+    let f = read_fields(a, &env.cfg)?;
     let issue = db::write(c, |c| {
         let id = resolve(c, input)?;
-        let version: i64 = c.query_row("SELECT version FROM issues WHERE id = ?1", [&id], |r| {
-            r.get(0)
-        })?;
+        claims::guard_write(c, env, &id, a.flag("force"), want)?;
+        let (version, kind): (i64, String) = c.query_row(
+            "SELECT version, type FROM issues WHERE id = ?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         if let Some(v) = expected
             && v != version
         {
@@ -553,9 +770,52 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             }
             set("legacy", Some(l.to_string()).filter(|l| !l.is_empty()))?;
         }
+        if let Some(k) = &f.kind {
+            if (kind == "release" || kind == "milestone") && k != "release" && k != "milestone" {
+                let members: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM issues WHERE release = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                if members > 0 {
+                    return Err(AitError::new(
+                        "IN_USE",
+                        format!(
+                            "{members} issue(s) belong to {id} as their release; move them first"
+                        ),
+                    ));
+                }
+            }
+            set("type", Some(k.clone()))?;
+        }
+        if let Some(p) = &f.priority {
+            set("priority", Some(p.clone()))?;
+        }
+        if f.agent.is_some() {
+            set("agent", none_if_empty(f.agent.clone()))?;
+        }
+        if f.effort.is_some() {
+            set("effort", none_if_empty(f.effort.clone()))?;
+        }
+        if f.reviewer.is_some() {
+            set("reviewer", none_if_empty(f.reviewer.clone()))?;
+        }
+        if let Some(v) = a.opt("release") {
+            let r = if v.trim().is_empty() {
+                None
+            } else {
+                let r = resolve(c, v)?;
+                if r == id {
+                    return Err(AitError::new("CYCLE", "an issue cannot be its own release"));
+                }
+                check_release_target(c, &r)?;
+                Some(r)
+            };
+            set("release", r)?;
+        }
         if changed.is_empty() {
             return Err(AitError::usage(
-                "nothing to change (use --title, --body, --size, --spec, --parent, --legacy)",
+                "nothing to change (use --title, --body, --size, --spec, --parent, --legacy, --type, --priority, --agent, --effort, --reviewer, --release)",
             ));
         }
         c.execute(
@@ -563,7 +823,7 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             params![id, env.now],
         )?;
         db::event(c, env, Some(&id), "edit", json!({ "fields": changed }))?;
-        get(c, &id)
+        get_full(c, &env.cfg, &id)
     })?;
     let text = format!(
         "edited {} (version {})",
@@ -574,7 +834,7 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
 }
 
 pub fn cmd_state(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["reason"], 2)?;
+    a.expect(&["reason", "force", "gen"], 2)?;
     let input = a.req_pos(0, "issue id")?;
     let state = a.req_pos(1, "state")?;
     if state == "done" {
@@ -585,9 +845,18 @@ pub fn cmd_state(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     }
     check_state(state, a.opt("reason"))?;
     let reason = a.opt("reason").filter(|r| !r.trim().is_empty());
+    let force = a.flag("force");
+    let want = a.opt_i64("gen")?;
     let issue = db::write(c, |c| {
         let id = resolve(c, input)?;
+        claims::guard_write(c, env, &id, force, want)?;
         let from = state_of(c, &id)?;
+        if from == "done" && !force {
+            return Err(AitError::new(
+                "ALREADY_DONE",
+                format!("{id} is done; reopening it needs --force"),
+            ));
+        }
         c.execute(
             "UPDATE issues SET state = ?2, reason = ?3, done_at = CASE WHEN ?2 = 'done' THEN done_at ELSE NULL END,
                  version = version + 1, updated_at = ?4 WHERE id = ?1",
@@ -598,9 +867,9 @@ pub fn cmd_state(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             env,
             Some(&id),
             "state",
-            json!({"from": from, "to": state, "reason": reason}),
+            json!({"from": from, "to": state, "reason": reason, "forced": force}),
         )?;
-        get(c, &id)
+        get_full(c, &env.cfg, &id)
     })?;
     let text = format!("{} is now {}", s(&issue, "id"), state);
     Ok(Output::new(json!({ "issue": issue }), text))
@@ -626,7 +895,8 @@ pub fn cmd_delete(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         }
         let refs: i64 = c.query_row(
             "SELECT (SELECT COUNT(*) FROM links WHERE dst = ?1 AND kind = 'needs')
-                  + (SELECT COUNT(*) FROM issues WHERE parent = ?1)",
+                  + (SELECT COUNT(*) FROM issues WHERE parent = ?1)
+                  + (SELECT COUNT(*) FROM issues WHERE release = ?1)",
             [&id],
             |r| r.get(0),
         )?;
@@ -634,12 +904,13 @@ pub fn cmd_delete(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             return Err(AitError::new(
                 "IN_USE",
                 format!(
-                    "{refs} issue(s) need {id} or have it as parent; use --force to delete anyway"
+                    "{refs} issue(s) need {id} or have it as parent or release; use --force to delete anyway"
                 ),
             ));
         }
         c.execute("DELETE FROM links WHERE src = ?1 OR dst = ?1", [&id])?;
         c.execute("UPDATE issues SET parent = NULL WHERE parent = ?1", [&id])?;
+        c.execute("UPDATE issues SET release = NULL WHERE release = ?1", [&id])?;
         c.execute("DELETE FROM claims WHERE issue = ?1", [&id])?;
         c.execute("DELETE FROM notes WHERE issue = ?1", [&id])?;
         c.execute("DELETE FROM issues WHERE id = ?1", [&id])?;
@@ -705,7 +976,7 @@ pub fn cmd_move(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "move",
             json!({"order": ord, "relative_to": target}),
         )?;
-        get(c, &id)
+        get_full(c, &env.cfg, &id)
     })?;
     Ok(Output::new(
         json!({ "issue": issue }),
@@ -762,16 +1033,27 @@ pub fn cmd_link(c: &Connection, env: &Env, a: &Args, remove: bool) -> Result<Out
 
 /// Everything needed to resume work on an issue, in one response.
 pub fn show_json(c: &Connection, env: &Env, id: &str, note_limit: i64) -> Result<Value> {
-    let issue = get(c, id)?;
+    let issue = get_full(c, &env.cfg, id)?;
     let claim = claims::claim_row(c, id)?.map(|r| claims::claim_json(&r, env.now));
     let approvals = claims::load_approvals(env)?;
     let blockers = claims::blockers(c, env, &approvals, id)?;
+    let has_members: i64 = c.query_row(
+        "SELECT COUNT(*) FROM issues WHERE parent = ?1 OR release = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let rollup = if s(&issue, "type") != "task" || has_members > 0 {
+        roadmap::rollup(c, env, &approvals, id)?
+    } else {
+        Value::Null
+    };
     Ok(json!({
         "issue": issue,
         "links": links_json(c, id)?,
         "claim": claim,
         "ready": blockers.is_empty(),
         "blockers": blockers,
+        "rollup": rollup,
         "latest_handoff": notes::latest_handoff(c, id)?,
         "notes": notes::recent(c, id, note_limit)?,
         "note_count": notes::count(c, id)?,
@@ -806,7 +1088,12 @@ fn render_show(v: &Value, now: i64) -> String {
     let i = &v["issue"];
     let mut out = String::new();
     let _ = writeln!(out, "{}  {}", s(i, "id"), line(s(i, "title"), 120));
-    let mut st = format!("state: {}", s(i, "state"));
+    let mut st = format!(
+        "{} {}  state: {}",
+        s(i, "type"),
+        s(i, "priority"),
+        s(i, "state")
+    );
     if !s(i, "reason").is_empty() {
         let _ = write!(st, " ({})", line(s(i, "reason"), 100));
     }
@@ -815,6 +1102,13 @@ fn render_show(v: &Value, now: i64) -> String {
         let _ = write!(st, "   size: {}", line(s(i, "size"), 20));
     }
     let _ = writeln!(out, "{st}");
+    let agent = agent_line(i);
+    if !agent.is_empty() {
+        let _ = writeln!(out, "{agent}");
+    }
+    if !s(i, "release").is_empty() {
+        let _ = writeln!(out, "release: {}", s(i, "release"));
+    }
     if !s(i, "spec").is_empty() {
         let _ = writeln!(out, "spec: {}", line(s(i, "spec"), 200));
     }
@@ -840,6 +1134,9 @@ fn render_show(v: &Value, now: i64) -> String {
         let r: Vec<String> = b.iter().map(|x| line(s(x, "message"), 100)).collect();
         let _ = writeln!(out, "not ready: {}", r.join("; "));
     }
+    if v["rollup"].is_object() {
+        let _ = writeln!(out, "rollup: {}", roadmap::rollup_line(&v["rollup"]));
+    }
     let l = &v["links"];
     render_refs(&mut out, "needs", &l["needs"]);
     render_refs(&mut out, "needed by", &l["needed_by"]);
@@ -852,6 +1149,9 @@ fn render_show(v: &Value, now: i64) -> String {
     render_refs(&mut out, "children", &l["children"]);
     if !s(i, "summary").is_empty() {
         let _ = writeln!(out, "done summary: {}", line(s(i, "summary"), 200));
+    }
+    if !s(i, "ran").is_empty() {
+        let _ = writeln!(out, "ran: {}", line(s(i, "ran"), 200));
     }
     let body = crate::output::clean(s(i, "body"));
     if !body.trim().is_empty() {
@@ -889,29 +1189,51 @@ fn render_show(v: &Value, now: i64) -> String {
     out
 }
 
+fn csv(v: Option<&str>, upper: bool) -> Vec<String> {
+    v.map(|v| {
+        v.split(',')
+            .map(|x| {
+                let x = x.trim();
+                if upper {
+                    x.to_ascii_uppercase()
+                } else {
+                    x.to_ascii_lowercase()
+                }
+            })
+            .filter(|x| !x.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     a.expect(
         &[
-            "state", "prefix", "ready", "claimed", "stale", "all", "limit",
+            "state", "prefix", "ready", "claimed", "stale", "all", "limit", "type", "priority",
+            "agent", "parent", "release", "tree",
         ],
         0,
     )?;
-    let states: Vec<String> = a
-        .opt("state")
-        .map(|v| {
-            v.split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
+    let states = csv(a.opt("state"), false);
     for st in &states {
         check_state(st, Some("x"))?;
     }
+    let types = csv(a.opt("type"), false);
+    for t in &types {
+        check_type(t)?;
+    }
+    let priorities = csv(a.opt("priority"), true);
+    for p in &priorities {
+        check_priority(p)?;
+    }
+    let agents = csv(a.opt("agent"), false);
     let prefix = a.opt("prefix").map(|p| p.trim().to_ascii_uppercase());
     let limit = a.opt_i64("limit")?.unwrap_or(500).clamp(1, 100_000);
+    let tree = a.flag("tree");
     let approvals = claims::load_approvals(env)?;
     let rows = db::read(c, |c| {
+        let parent = a.opt("parent").map(|x| resolve(c, x)).transpose()?;
+        let release = a.opt("release").map(|x| resolve(c, x)).transpose()?;
         let ready: HashSet<String> = if a.flag("ready") {
             claims::ready_ids(c, env, &approvals, false)?
                 .into_iter()
@@ -919,47 +1241,44 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         } else {
             HashSet::new()
         };
+        let order = if tree { "ord, id" } else { "priority, ord, id" };
         let sql = format!(
             "SELECT {COLS}, c.session, c.generation, c.lease_until FROM issues
              LEFT JOIN claims c ON c.issue = issues.id
-             ORDER BY ord, id"
+             ORDER BY {order}"
         );
         let mut st = c.prepare(&sql)?;
-        let mut out = Vec::new();
+        let mut all: Vec<Value> = Vec::new();
+        let mut pass: HashSet<String> = HashSet::new();
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
-            let mut v = row_json(r)?;
+            let mut v = with_model(row_json(r)?, &env.cfg);
             let id = s(&v, "id").to_string();
             let state = s(&v, "state").to_string();
-            let session: Option<String> = r.get(15)?;
-            let lease: Option<i64> = r.get(17)?;
+            let session: Option<String> = r.get(NCOLS)?;
+            let lease: Option<i64> = r.get(NCOLS + 2)?;
             let claim_status = match (&session, lease) {
                 (Some(_), Some(l)) if l > env.now => "live",
                 (Some(_), _) => "stale",
                 _ => "",
             };
-            if !states.is_empty() {
-                if !states.contains(&state) {
-                    continue;
-                }
-            } else if !a.flag("all") && !a.flag("ready") && (state == "done" || state == "dropped")
-            {
-                continue;
-            }
-            if let Some(p) = &prefix
-                && !id.starts_with(&format!("{p}-"))
-            {
-                continue;
-            }
-            if a.flag("ready") && !ready.contains(&id) {
-                continue;
-            }
-            if a.flag("claimed") && claim_status != "live" {
-                continue;
-            }
-            if a.flag("stale") && claim_status != "stale" {
-                continue;
-            }
+            let hide_closed = !a.flag("all") && !a.flag("ready") && !tree;
+            let ok = (if states.is_empty() {
+                !(hide_closed && (state == "done" || state == "dropped"))
+                    && !(tree && state == "dropped" && !a.flag("all"))
+            } else {
+                states.contains(&state)
+            }) && prefix
+                .as_ref()
+                .is_none_or(|p| id.starts_with(&format!("{p}-")))
+                && (types.is_empty() || types.iter().any(|t| t == s(&v, "type")))
+                && (priorities.is_empty() || priorities.iter().any(|p| p == s(&v, "priority")))
+                && (agents.is_empty() || agents.iter().any(|x| x == s(&v, "agent")))
+                && parent.as_deref().is_none_or(|p| s(&v, "parent") == p)
+                && release.as_deref().is_none_or(|p| s(&v, "release") == p)
+                && (!a.flag("ready") || ready.contains(&id))
+                && (!a.flag("claimed") || claim_status == "live")
+                && (!a.flag("stale") || claim_status == "stale");
             if let Some(o) = v.as_object_mut() {
                 o.remove("body");
                 o.insert(
@@ -967,7 +1286,7 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                     match &session {
                         Some(sn) => json!({
                             "session": sn,
-                            "generation": r.get::<_, i64>(16)?,
+                            "generation": r.get::<_, i64>(NCOLS + 1)?,
                             "lease_until": iso_opt(lease),
                             "status": claim_status,
                         }),
@@ -975,12 +1294,20 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                     },
                 );
             }
-            out.push(v);
-            if i64::try_from(out.len()).unwrap_or(i64::MAX) >= limit {
-                break;
+            if ok {
+                pass.insert(id);
             }
+            all.push(v);
         }
-        Ok(out)
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        if !tree {
+            return Ok(all
+                .into_iter()
+                .filter(|v| pass.contains(s(v, "id")))
+                .take(limit)
+                .collect::<Vec<_>>());
+        }
+        Ok(build_tree(all, &pass, parent.as_deref(), limit))
     })?;
     let mut text = String::new();
     for v in &rows {
@@ -992,11 +1319,20 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             ),
             _ => String::new(),
         };
+        let depth = usize::try_from(v["depth"].as_i64().unwrap_or(0)).unwrap_or(0);
+        let kind = if s(v, "type") == "task" {
+            String::new()
+        } else {
+            format!("[{}] ", s(v, "type"))
+        };
         let _ = writeln!(
             text,
-            "{:<14} {:<9} {}{}",
+            "{}{:<12} {} {:<8} {}{}{}",
+            "  ".repeat(depth),
             s(v, "id"),
+            s(v, "priority"),
             s(v, "state"),
+            kind,
             line(s(v, "title"), 70),
             claim
         );
@@ -1008,6 +1344,75 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         json!({ "count": rows.len(), "issues": rows }),
         text,
     ))
+}
+
+/// Orders issues as a tree by `parent` (siblings by order), keeping every
+/// issue that passed the filters plus its ancestors. Adds `depth`.
+fn build_tree(
+    all: Vec<Value>,
+    pass: &HashSet<String>,
+    root: Option<&str>,
+    limit: usize,
+) -> Vec<Value> {
+    let parent_of: HashMap<String, String> = all
+        .iter()
+        .filter(|v| !s(v, "parent").is_empty())
+        .map(|v| (s(v, "id").to_string(), s(v, "parent").to_string()))
+        .collect();
+    let mut keep: HashSet<String> = HashSet::new();
+    for id in pass {
+        let mut cur = Some(id.clone());
+        let mut steps = 0;
+        while let Some(x) = cur {
+            if !keep.insert(x.clone()) || steps > 10_000 {
+                break;
+            }
+            steps += 1;
+            if root == Some(x.as_str()) {
+                break;
+            }
+            cur = parent_of.get(&x).cloned();
+        }
+    }
+    let ids: HashSet<String> = all.iter().map(|v| s(v, "id").to_string()).collect();
+    let mut children: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, v) in all.iter().enumerate() {
+        let id = s(v, "id");
+        if !keep.contains(id) {
+            continue;
+        }
+        let p = s(v, "parent");
+        let is_root = match root {
+            Some(r) => p == r,
+            None => p.is_empty() || !ids.contains(p) || !keep.contains(p),
+        };
+        if is_root {
+            roots.push(i);
+        } else {
+            children.entry(p.to_string()).or_default().push(i);
+        }
+    }
+    let mut out: Vec<Value> = Vec::new();
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<(usize, i64)> = roots.into_iter().rev().map(|i| (i, 0)).collect();
+    while let Some((i, depth)) = stack.pop() {
+        if out.len() >= limit || !seen.insert(i) {
+            continue;
+        }
+        let mut v = all[i].clone();
+        let id = s(&v, "id").to_string();
+        if let Some(o) = v.as_object_mut() {
+            o.insert("depth".to_string(), json!(depth));
+        }
+        out.push(v);
+        if let Some(kids) = children.get(&id) {
+            for k in kids.iter().rev() {
+                stack.push((*k, depth + 1));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1071,5 +1476,21 @@ mod tests {
         assert!(check_state("blocked", Some("waiting on API")).is_ok());
         assert!(check_state("ready", None).is_ok());
         assert!(check_state("bogus", None).is_err());
+    }
+
+    #[test]
+    fn field_values() {
+        assert!(check_priority("P0").is_ok());
+        assert!(check_priority("P5").is_err());
+        assert!(check_type("milestone").is_ok());
+        assert!(check_type("epic").is_err());
+        assert!(check_effort("xhigh").is_ok());
+        assert!(check_effort("huge").is_err());
+        let mut cfg = Config::default();
+        assert!(check_agent("deep", &cfg).is_ok());
+        assert!(check_agent("Deep One", &cfg).is_err());
+        cfg.agents.push(("light".into(), "haiku".into()));
+        assert!(check_agent("deep", &cfg).is_err());
+        assert!(check_agent("light", &cfg).is_ok());
     }
 }
