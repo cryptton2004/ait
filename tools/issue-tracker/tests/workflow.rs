@@ -529,3 +529,83 @@ fn acceptance_criteria_gate_review_and_done() {
         .args(["--json", "criteria", "CORE-1-00"]);
     assert_eq!(t.exec(c).json["criteria"][1]["done"], true);
 }
+
+#[test]
+fn epics_roll_up_to_in_review_and_done() {
+    let t = T::new("rollup");
+    t.ok(
+        None,
+        &[
+            "add", "EPIC", "world", "--type", "feature", "--state", "planned",
+        ],
+    );
+    t.ok(None, &["add", "WLD", "a", "--parent", "EPIC-1-00"]);
+    t.ok(None, &["add", "WLD", "b", "--parent", "EPIC-1-00"]);
+    t.ok(
+        None,
+        &[
+            "add",
+            "EPIC",
+            "epic review",
+            "--type",
+            "review",
+            "--parent",
+            "EPIC-1-00",
+        ],
+    );
+    let state = |id: &str| {
+        t.ok(None, &["show", id])["issue"]["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    t.ok(Some("a1"), &["claim", "WLD-1-00"]);
+    t.ok(
+        Some("a1"),
+        &["state", "WLD-1-00", "in_review", "--gen", "1"],
+    );
+    assert_eq!(state("EPIC-1-00"), "planned");
+    t.ok(Some("a2"), &["claim", "WLD-1-01"]);
+    let v = t.ok(
+        Some("a2"),
+        &["state", "WLD-1-01", "in_review", "--gen", "1"],
+    );
+    assert_eq!(v["rollup"][0]["to"], "in_review");
+    assert_eq!(state("EPIC-1-00"), "in_review");
+    // A child sent back takes the epic back out of review.
+    t.ok(
+        None,
+        &[
+            "state",
+            "WLD-1-01",
+            "ready",
+            "--reason",
+            "review found a bug",
+        ],
+    );
+    assert_eq!(state("EPIC-1-00"), "planned");
+    t.ok(Some("a2"), &["claim", "WLD-1-01"]);
+    t.ok(
+        Some("a2"),
+        &["state", "WLD-1-01", "in_review", "--gen", "2"],
+    );
+    assert_eq!(state("EPIC-1-00"), "in_review");
+    // Children finished, but the epic's own review is open: it stays in review.
+    t.ok(None, &["done", "WLD-1-00", "--summary", "ok", "--force"]);
+    t.ok(None, &["done", "WLD-1-01", "--summary", "ok", "--force"]);
+    assert_eq!(state("EPIC-1-00"), "in_review");
+    t.ok(Some("r1"), &["claim", "EPIC-1-01"]);
+    let v = t.ok(
+        Some("r1"),
+        &["done", "EPIC-1-01", "--summary", "epic ok", "--gen", "1"],
+    );
+    assert_eq!(v["rollup"][0]["to"], "done");
+    let v = t.ok(None, &["show", "EPIC-1-00"]);
+    assert_eq!(v["issue"]["state"], "done");
+    assert!(
+        v["issue"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("automatic")
+    );
+}

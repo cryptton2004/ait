@@ -1005,10 +1005,23 @@ pub fn cmd_state(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "state",
             json!({"from": from, "to": state, "reason": reason, "forced": force}),
         )?;
-        get_full(c, &env.cfg, &id)
+        let rolled = roadmap::auto_rollup(c, env, &id)?;
+        Ok((get_full(c, &env.cfg, &id)?, rolled))
     })?;
-    let text = format!("{} is now {}", s(&issue, "id"), state);
-    Ok(Output::new(json!({ "issue": issue }), text))
+    let (issue, rolled) = issue;
+    let mut text = format!("{} is now {}", s(&issue, "id"), state);
+    for r in &rolled {
+        let _ = write!(
+            text,
+            "\n{} moved to {} (all children)",
+            s(r, "id"),
+            s(r, "to")
+        );
+    }
+    Ok(Output::new(
+        json!({ "issue": issue, "rollup": rolled }),
+        text,
+    ))
 }
 
 pub fn cmd_delete(c: &Connection, env: &Env, a: &Args) -> Result<Output> {

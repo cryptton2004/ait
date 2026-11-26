@@ -375,3 +375,113 @@ pub fn cmd_ship(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         text,
     ))
 }
+
+const CONTAINERS: &[&str] = &["feature", "milestone", "release"];
+
+fn parent_of(c: &Connection, id: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(
+        c.query_row("SELECT parent FROM issues WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten(),
+    )
+}
+
+/// Whether the container's last state change was made by this rollup.
+fn auto_moved(c: &Connection, id: &str) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    let d: Option<String> = c
+        .query_row(
+            "SELECT details FROM events WHERE issue = ?1 AND action IN ('state', 'done')
+             ORDER BY seq DESC LIMIT 1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(d.and_then(|d| serde_json::from_str::<Value>(&d).ok())
+        .is_some_and(|v| v["auto"] == true))
+}
+
+/// After `id` changed state, moves its container ancestors (feature,
+/// milestone, release via `parent`) along: to in_review once every child
+/// (reviews aside) is in review or finished, to done once every child is
+/// finished, its own reviews are done and its criteria are checked. A
+/// container this rollup moved to in_review goes back to planned when a
+/// child is reopened. Returns the changes made.
+pub fn auto_rollup(c: &Connection, env: &Env, id: &str) -> Result<Vec<Value>> {
+    let mut changes = Vec::new();
+    let mut cur = parent_of(c, id)?;
+    while let Some(p) = cur {
+        let (kind, state): (String, String) =
+            c.query_row("SELECT type, state FROM issues WHERE id = ?1", [&p], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        if !CONTAINERS.contains(&kind.as_str()) || state == "dropped" {
+            break;
+        }
+        let mut st = c.prepare(
+            "SELECT state FROM issues WHERE parent = ?1 AND type <> 'review' AND state <> 'dropped'",
+        )?;
+        let kids: Vec<String> = st
+            .query_map([&p], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if kids.is_empty() {
+            break;
+        }
+        let finished = |s: &String| issues::FINISHED.contains(&s.as_str());
+        let all_finished = kids.iter().all(finished);
+        let all_reviewing = kids.iter().all(|s| finished(s) || s == "in_review");
+        let (_, open_reviews) = claims::open_reviews(c, &p)?;
+        let criteria_open = !crate::criteria::open(c, &p)?.is_empty();
+        let to = if all_finished && open_reviews.is_empty() && !criteria_open {
+            (!issues::FINISHED.contains(&state.as_str())).then_some("done")
+        } else if all_reviewing {
+            (state != "in_review" && !issues::FINISHED.contains(&state.as_str()))
+                .then_some("in_review")
+        } else if state == "in_review" && auto_moved(c, &p)? {
+            Some("planned")
+        } else {
+            None
+        };
+        let Some(to) = to else {
+            break;
+        };
+        if to == "done" {
+            let summary = format!("all {} children finished (automatic rollup)", kids.len());
+            c.execute(
+                "UPDATE issues SET state = 'done', reason = NULL, summary = ?2, done_at = ?3,
+                     version = version + 1, updated_at = ?3 WHERE id = ?1",
+                params![p, summary, env.now],
+            )?;
+            c.execute(
+                "UPDATE claims SET session = NULL, lease_until = NULL WHERE issue = ?1",
+                [&p],
+            )?;
+            db::event(
+                c,
+                env,
+                Some(&p),
+                "done",
+                json!({"summary": summary, "from": state, "auto": true, "after": id}),
+            )?;
+        } else {
+            c.execute(
+                "UPDATE issues SET state = ?2, reason = NULL, done_at = NULL,
+                     version = version + 1, updated_at = ?3 WHERE id = ?1",
+                params![p, to, env.now],
+            )?;
+            db::event(
+                c,
+                env,
+                Some(&p),
+                "state",
+                json!({"from": state, "to": to, "auto": true, "after": id}),
+            )?;
+        }
+        changes.push(json!({"id": p, "from": state, "to": to}));
+        cur = parent_of(c, &p)?;
+    }
+    Ok(changes)
+}

@@ -850,10 +850,21 @@ pub fn cmd_done(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             json!({"summary": summary, "from": state, "ran": ran,
                    "generation": row.map(|r| r.generation), "forced": force}),
         )?;
-        issues::get_full(c, &env.cfg, &id)
+        let rolled = crate::roadmap::auto_rollup(c, env, &id)?;
+        Ok((issues::get_full(c, &env.cfg, &id)?, rolled))
     })?;
-    let text = format!("done {}  {}", s(&issue, "id"), line(s(&issue, "title"), 80));
-    Ok(Output::new(json!({"issue": issue}), text))
+    let (issue, rolled) = issue;
+    let mut text = format!("done {}  {}", s(&issue, "id"), line(s(&issue, "title"), 80));
+    for r in &rolled {
+        let _ = write!(
+            text,
+            "
+{} moved to {} (all children)",
+            s(r, "id"),
+            s(r, "to")
+        );
+    }
+    Ok(Output::new(json!({"issue": issue, "rollup": rolled}), text))
 }
 
 pub fn cmd_heartbeat(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
