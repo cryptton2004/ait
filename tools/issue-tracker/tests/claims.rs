@@ -326,3 +326,53 @@ fn approvals_file_gates_what_next_offers() {
         "CONFIG"
     );
 }
+
+/// `claim --lease` sets this claim's own lease length; renewals (any call by
+/// the session, heartbeat) keep it instead of falling back to lease_minutes.
+#[test]
+fn a_claim_can_carry_its_own_lease() {
+    let t = T::new("lease");
+    t.ok_at(None, T0, &["add", "CORE", "long decision"]);
+    t.ok_at(None, T0, &["add", "CORE", "normal"]);
+    const DAY: i64 = 24 * 60 * MIN;
+    let v = t.ok_at(Some("owner"), T0, &["claim", "CORE-1-00", "--lease", "2d"]);
+    assert_eq!(v["claim"]["lease_until"], "2026-11-28T08:00:00Z", "{v}");
+    assert_eq!(v["claim"]["lease_minutes"], 2880);
+    // Another claim by the same session uses the default. Renewing the
+    // session's leases keeps the first one at two days from now.
+    let v = t.ok_at(Some("owner"), T0 + 5 * MIN, &["claim", "CORE-1-01"]);
+    assert!(v["claim"]["lease_minutes"].is_null(), "{v}");
+    let v = t.ok_at(Some("owner"), T0 + 10 * MIN, &["show", "CORE-1-00"]);
+    assert_eq!(v["claim"]["lease_until"], "2026-11-28T08:10:00Z", "{v}");
+    // A heartbeat a day later renews to two days from then.
+    let v = t.ok_at(Some("owner"), T0 + DAY, &["heartbeat"]);
+    let c0 = v["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["issue"] == "CORE-1-00")
+        .unwrap();
+    assert_eq!(c0["lease_until"], "2026-11-29T08:00:00Z", "{v}");
+    // The other claim (default 60 minutes) had already expired and stays so.
+    let c1 = v["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["issue"] == "CORE-1-01")
+        .unwrap();
+    assert_eq!(c1["status"], "stale", "{v}");
+    // Others still cannot take a live long claim.
+    assert_eq!(
+        t.err_at(Some("a1"), T0 + DAY, &["claim", "CORE-1-00"]).1,
+        "ALREADY_CLAIMED"
+    );
+    // Limits: 1 minute to 30 days, in a duration format.
+    for bad in ["0m", "31d", "soon"] {
+        let (code, _) = t.err_at(
+            Some("owner"),
+            T0 + DAY,
+            &["claim", "CORE-1-01", "--lease", bad],
+        );
+        assert_eq!(code, 2, "{bad}");
+    }
+}

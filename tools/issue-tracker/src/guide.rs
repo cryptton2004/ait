@@ -34,7 +34,8 @@ Claims (need AIT_SESSION or --as)
   next --claim [filters] [--take-stale] claim the top ready issue atomically
   next --frame [--claim]                idea/planned issues approved for framing
   next --explain <ID>                   why an issue is not offered
-  claim <ID> [--take]                   claim one issue; --take takes over a stale claim
+  claim <ID> [--take] [--lease 2d]      claim one issue; --take takes over a stale claim;
+                                        --lease sets this claim's lease length (1m..30d)
   heartbeat [<ID>] [--gen N]            renew live leases (any ait call also does)
   verify <ID> --gen N                   check you still hold that generation
   release <ID> [--gen N] [--force]      give the issue back

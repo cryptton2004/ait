@@ -108,6 +108,10 @@ pub const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX criteria_issue ON criteria(issue, pos);
     ",
+    // 5: a claim may carry its own lease length (NULL = lease_minutes)
+    "
+    ALTER TABLE claims ADD COLUMN lease_ms INTEGER;
+    ",
 ];
 
 pub fn schema_version() -> i64 {
@@ -304,8 +308,10 @@ pub fn touch_session(conn: &Connection, env: &Env) -> Result<()> {
         c.execute(
             // Only live leases: an expired claim stays stale until the
             // session claims it again (or another session takes it over).
-            "UPDATE claims SET lease_until = ?2 WHERE session = ?1 AND lease_until > ?3",
-            params![s, env.now + env.lease_ms(), env.now],
+            // A claim with its own lease length keeps it on renewal.
+            "UPDATE claims SET lease_until = MAX(lease_until, ?3 + COALESCE(lease_ms, ?2))
+             WHERE session = ?1 AND lease_until > ?3",
+            params![s, env.lease_ms(), env.now],
         )?;
         Ok(())
     })

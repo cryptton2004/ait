@@ -10,7 +10,7 @@ use crate::error::{AitError, Result};
 use crate::issues;
 use crate::notes;
 use crate::output::{Output, line, s};
-use crate::time::{iso, iso_opt};
+use crate::time::{iso, iso_opt, parse_duration};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -22,6 +22,8 @@ pub struct ClaimRow {
     pub generation: i64,
     pub claimed_at: Option<i64>,
     pub lease_until: Option<i64>,
+    /// This claim's own lease length (`claim --lease`); None = lease_minutes.
+    pub lease_ms: Option<i64>,
 }
 
 impl ClaimRow {
@@ -36,7 +38,7 @@ impl ClaimRow {
 
 pub fn claim_row(c: &Connection, id: &str) -> Result<Option<ClaimRow>> {
     Ok(c.query_row(
-        "SELECT issue, session, generation, claimed_at, lease_until FROM claims WHERE issue = ?1",
+        "SELECT issue, session, generation, claimed_at, lease_until, lease_ms FROM claims WHERE issue = ?1",
         [id],
         |r| {
             Ok(ClaimRow {
@@ -45,6 +47,7 @@ pub fn claim_row(c: &Connection, id: &str) -> Result<Option<ClaimRow>> {
                 generation: r.get(2)?,
                 claimed_at: r.get(3)?,
                 lease_until: r.get(4)?,
+                lease_ms: r.get(5)?,
             })
         },
     )
@@ -65,6 +68,7 @@ pub fn claim_json(r: &ClaimRow, now: i64) -> Value {
         "generation": r.generation,
         "claimed_at": iso_opt(r.claimed_at),
         "lease_until": iso_opt(r.lease_until),
+        "lease_minutes": r.lease_ms.map(|m| m / 60_000),
         "status": status,
     })
 }
@@ -420,7 +424,25 @@ pub fn ready_ids(
 }
 
 /// Claims `id` for the current session inside the caller's transaction.
-fn do_claim(c: &Connection, env: &Env, id: &str, take: bool) -> Result<Value> {
+/// Longest lease a claim may ask for with `--lease`.
+const MAX_LEASE_MS: i64 = 30 * 86_400_000;
+
+/// `--lease 2d`: this claim's own lease length (1 minute to 30 days).
+fn lease_opt(a: &Args) -> Result<Option<i64>> {
+    let Some(v) = a.opt("lease") else {
+        return Ok(None);
+    };
+    let ms = parse_duration(v)?;
+    if !(60_000..=MAX_LEASE_MS).contains(&ms) {
+        return Err(AitError::new(
+            "INVALID_INPUT",
+            format!("lease '{v}' must be between 1m and 30d"),
+        ));
+    }
+    Ok(Some(ms))
+}
+
+fn do_claim(c: &Connection, env: &Env, id: &str, take: bool, lease: Option<i64>) -> Result<Value> {
     let me = env.require_session()?;
     let state = issues::state_of(c, id)?;
     if ["done", "dropped", "released", "in_review"].contains(&state.as_str()) {
@@ -447,7 +469,7 @@ fn do_claim(c: &Connection, env: &Env, id: &str, take: bool) -> Result<Value> {
     {
         return Err(AitError::new("WIP_LIMIT", w).retryable());
     }
-    let lease_until = env.now + env.lease_ms();
+    let lease_until = env.now + lease.unwrap_or_else(|| env.lease_ms());
     let mut taken_from = Value::Null;
     let mut renewed = false;
     let generation = match &prev {
@@ -484,18 +506,19 @@ fn do_claim(c: &Connection, env: &Env, id: &str, take: bool) -> Result<Value> {
         None => 1,
     };
     if renewed {
+        // Claiming again renews; --lease replaces this claim's lease length.
         c.execute(
-            "UPDATE claims SET lease_until = ?2 WHERE issue = ?1",
-            params![id, lease_until],
+            "UPDATE claims SET lease_until = ?2, lease_ms = COALESCE(?3, lease_ms) WHERE issue = ?1",
+            params![id, lease_until, lease],
         )?;
     } else {
         c.execute(
-            "INSERT INTO claims(issue, session, generation, claimed_at, lease_until)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO claims(issue, session, generation, claimed_at, lease_until, lease_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(issue) DO UPDATE SET session = excluded.session,
                  generation = excluded.generation, claimed_at = excluded.claimed_at,
-                 lease_until = excluded.lease_until",
-            params![id, me, generation, env.now, lease_until],
+                 lease_until = excluded.lease_until, lease_ms = excluded.lease_ms",
+            params![id, me, generation, env.now, lease_until, lease],
         )?;
         let action = if taken_from.is_null() {
             "claim"
@@ -557,12 +580,13 @@ fn render_claim(v: &Value) -> String {
 }
 
 pub fn cmd_claim(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["take"], 1)?;
+    a.expect(&["take", "lease"], 1)?;
     let input = a.req_pos(0, "issue id")?;
     env.require_session()?;
+    let lease = lease_opt(a)?;
     let v = db::write(c, |c| {
         let id = issues::resolve(c, input)?;
-        do_claim(c, env, &id, a.flag("take"))
+        do_claim(c, env, &id, a.flag("take"), lease)
     })?;
     let text = render_claim(&v);
     Ok(Output::new(v, text))
@@ -590,9 +614,11 @@ pub fn cmd_next(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "agent",
             "priority",
             "type",
+            "lease",
         ],
         0,
     )?;
+    let lease = lease_opt(a)?;
     let ap = load_approvals(env)?;
     if let Some(x) = a.opt("explain") {
         let v = db::read(c, |c| {
@@ -646,7 +672,7 @@ pub fn cmd_next(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         let v = db::write(c, |c| {
             let ids = candidates(c, env, &ap, &pick)?;
             match ids.first() {
-                Some(id) => do_claim(c, env, id, true),
+                Some(id) => do_claim(c, env, id, true, lease),
                 None => Err(AitError::new("NO_WORK", what).retryable()),
             }
         })?;
@@ -872,7 +898,6 @@ pub fn cmd_heartbeat(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     let me = env.require_session()?.to_string();
     let want = a.opt_i64("gen")?;
     let rows = db::write(c, |c| {
-        let lease_until = env.now + env.lease_ms();
         if let Some(input) = a.pos(0) {
             let id = issues::resolve(c, input)?;
             let row = claim_row(c, &id)?;
@@ -880,11 +905,12 @@ pub fn cmd_heartbeat(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             require_claimant(env, row.as_ref(), &id, false)?;
         }
         c.execute(
-            "UPDATE claims SET lease_until = ?2 WHERE session = ?1 AND lease_until > ?3",
-            params![me, lease_until, env.now],
+            "UPDATE claims SET lease_until = MAX(lease_until, ?3 + COALESCE(lease_ms, ?2))
+             WHERE session = ?1 AND lease_until > ?3",
+            params![me, env.lease_ms(), env.now],
         )?;
         let mut st = c.prepare(
-            "SELECT issue, session, generation, claimed_at, lease_until FROM claims
+            "SELECT issue, session, generation, claimed_at, lease_until, lease_ms FROM claims
              WHERE session = ?1 ORDER BY issue",
         )?;
         let rows: Vec<Value> = st
@@ -895,6 +921,7 @@ pub fn cmd_heartbeat(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                     generation: r.get(2)?,
                     claimed_at: r.get(3)?,
                     lease_until: r.get(4)?,
+                    lease_ms: r.get(5)?,
                 })
             })?
             .map(|r| r.map(|r| claim_json(&r, env.now)))

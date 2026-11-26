@@ -7,7 +7,7 @@ integration tests in `tests/`. Anything not written here (text output, the
 dashboard's HTML, database tables) is internal and may change at any time.
 
 - Contract version: **1** (`GET /api/version` → `"api": 1`)
-- Database schema it was written against: **4**
+- Database schema it was written against: **5**
 
 ## 1. Versioning rules
 
@@ -65,8 +65,9 @@ A claim is not a state: a claimed issue keeps its state (usually `ready`).
 not on the board.
 
 **Claim object:** `issue`, `session`, `generation` (int, rises on every new
-claim of the issue), `claimed_at`, `lease_until`, `status` (`live` or
-`stale`).
+claim of the issue), `claimed_at`, `lease_until`, `lease_minutes` (this
+claim's own lease length from `--lease`, or null for the configured
+default), `status` (`live` or `stale`).
 
 **Criterion object:** `n` (1-based position), `text`, `done` (bool),
 `done_at`, `done_by`.
@@ -158,7 +159,7 @@ policy (see below), and close the connection.
 
 | path | body |
 |---|---|
-| `/api/version` | `{"api": 1, "ait": "0.1.0", "schema": 4, "writable": true}` |
+| `/api/version` | `{"api": 1, "ait": "0.1.0", "schema": 5, "writable": true}` |
 | `/api/head` | `{"head": N}` — latest event `seq`; poll this cheaply and refetch when it changes |
 | `/api/issues` | `{"head", "issues": [board item], "wip": {"in_progress": N, "in_review": N, "agent.<tier>": N}}` (configured limits only; count live items yourself from `issues`). Also `"agent_tiers": {tier: model}` (the configured `agent.<tier>` keys) |
 | `/api/issue/<ID>` | same object as `ait show --json` (50 notes) |
@@ -195,7 +196,7 @@ X-Ait-Token: <token>
 ```
 
 - Allowed commands: `add`, `edit`, `state`, `move`, `done`, `note`, `link`,
-  `unlink`, `ship`, `criteria`. Others → 400 `USAGE`.
+  `unlink`, `ship`, `criteria`, `claim`, `release`. Others → 400 `USAGE`.
 - Refused options: `--db`, `--config`, `--as`, `--help`, `--body-file`,
   `--text-file`, `--from-file`, `--out` → 400 `USAGE`.
 - Writes are recorded as session `dashboard`. Changing an issue an agent
@@ -265,4 +266,5 @@ frame-ancestors 'self' <origins>`); without the setting every response says
 - **1** (2026-11-26): first published contract. Columns backlog → released,
   `in_review` / `released` states, review issues, `ship`, needs with
   `--until`, WIP limits, acceptance criteria, container auto-rollup, flow
-  stats, `allowed_origins`, `/api/version`, `/api/token`. `/api/issues` gained `agent_tiers` (additive).
+  stats, `allowed_origins`, `/api/version`, `/api/token`. `/api/issues` gained `agent_tiers`; claims gained `lease_minutes` and the
+  dashboard may run `claim` and `release` (all additive).

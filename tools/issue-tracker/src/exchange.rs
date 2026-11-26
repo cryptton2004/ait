@@ -73,6 +73,7 @@ const TABLES: &[(&str, &str, &[&str], &str)] = &[
             "generation",
             "claimed_at",
             "lease_until",
+            "lease_ms",
         ],
         "issue",
     ),

@@ -92,7 +92,7 @@ Every command accepts `--json` (machine output), `--as <session>`,
 | `ship <ID> [--ref r] [--force]` | Release a release, milestone or feature: every member must be done or dropped, and every done task merged into `main` (with the `Issue-ID` trailer, or in `git_baseline`) and, when `origin/main` exists, pushed. Marks the container and its done members `released`. `--force` skips the git checks |
 | `roadmap [--all]` | Releases, milestones and features, each with done/total, percent, in progress, the next offered member, open decisions and blocked members. A container's members are its children (`parent`) and everything whose `release` is it, recursively |
 | `next` | What would be offered, by priority then order (`--prefix`, `--limit`, `--agent`, `--priority`, `--type`; tasks only unless `--type` is given). `--claim` claims the top one. `--take-stale` also takes over expired claims. `--frame` offers `idea`/`planned` issues with a frame approval instead. `--explain ID` says why an issue isn't offered and names the approval cause (`FRAME_ONLY`, `EXPIRED`, `EXCLUDED`, `NOT_STARTED`, `NOT_APPROVED`, `NO_APPROVALS_FILE`) |
-| `claim <ID> [--take]` | Claim one issue. `--take` takes over a claim whose lease expired, and returns the previous handoff |
+| `claim <ID> [--take] [--lease 2d]` | Claim one issue. `--take` takes over a claim whose lease expired, and returns the previous handoff. `--lease` gives this claim its own lease length (1m to 30d, for example for a decision that needs meetings); renewals keep that length. `next --claim` takes `--lease` too |
 | `heartbeat [<ID>]` | Renews your live leases. Any `ait` call by you renews them too, at most once a minute. An expired lease is not revived: claim the issue again |
 | `verify <ID> --gen N` | Succeeds only if you still hold generation N |
 | `release <ID> [--gen N] [--force]` | Give an issue back. Only the claimant can, unless `--force` |
@@ -167,7 +167,7 @@ card onto a column changes its state and asks for what the command needs (a
 reason for Waiting, a summary for Done).
 
 Every change runs the same `ait` command the CLI would (`add`, `edit`,
-`state`, `move`, `done`, `note`, `link`, `unlink`, `ship`, `criteria`), recorded as the session
+`state`, `move`, `done`, `note`, `link`, `unlink`, `ship`, `criteria`, `claim`, `release`), recorded as the session
 `dashboard`, so the same checks apply. When the CLI would ask for `--force`
 (an agent's claim, closing without a claim, reopening done work), the
 dashboard shows the refusal and an explicit "Override (--force)" button.
@@ -175,7 +175,7 @@ Cards show stale claims with a badge (and a filter), column headers show
 WIP "live / limit", issue details have the acceptance checklist, and the
 Flow panel shows `ait stats` for 7 days, 30 days or all time. Dropping a card
 on In review submits it; dropping it on Released runs `ship`.
-Claims, deletes, imports and backups stay on the command line.
+Dropping a card on In progress claims it for you (session `dashboard`) with a lease you choose (60m prefilled, for example 2d); dropping it back on Ready releases it, and Done closes it with that claim. Deletes, imports and backups stay on the command line.
 
 Safety: the server listens on 127.0.0.1 only and refuses other Host names.
 Each start creates a random token that only the dashboard page carries;

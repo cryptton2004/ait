@@ -300,13 +300,25 @@ async function rankBefore(id, target) {
 function dropOnColumn(id, col) {
   const me = issues.find(x => x.id === id);
   if (!me || me.column === col) return;
-  if (col === "ready") act(["state", id, "ready"], id + " is ready");
+  // Leaving In progress gives the claim back first (as `ait release`).
+  if (me.column === "in_progress" && (col === "ready" || col === "backlog")) {
+    act(releaseArgs(me), id + " released", () => { if (col === "backlog") stateDialog(me, "planned"); });
+    return;
+  }
+  if (col === "in_progress") claimDialog(me);
+  else if (col === "ready") act(["state", id, "ready"], id + " is ready");
   else if (col === "backlog") stateDialog(me, "planned");
   else if (col === "waiting") stateDialog(me, "blocked");
   else if (col === "in_review") act(["state", id, "in_review"], id + " is in review");
   else if (col === "done") doneDialog(me);
   else if (col === "released") shipDialog(me);
-  else toast("Claims are made by agents (ait claim / ait next --claim), not from the dashboard.", true);
+}
+// The board item of an issue (it carries the claim's session and generation).
+function boardItem(id) { return issues.find(x => x.id === id) || {}; }
+function mine(id) { const b = boardItem(id); return b.session === "dashboard" ? b : null; }
+function releaseArgs(i) {
+  const m = mine(i.id);
+  return m ? ["release", i.id, "--gen", String(m.generation)] : ["release", i.id];
 }
 function renderColumns() {
   const root = document.getElementById("columns");
@@ -610,10 +622,28 @@ function doneDialog(i) {
     return () => {
       if (!sm.value.trim()) need(sm, "A summary of what was delivered is required.");
       const a = ["done", i.id, "--summary", sm.value.trim()];
+      const m = mine(i.id);
+      if (m) a.push("--gen", String(m.generation));
       if (ran.value.trim()) a.push("--ran", ran.value.trim());
       return a;
     };
   }, "Close as done", a => [a, i.id + " is done", () => showDetail(i.id)]);
+}
+function claimDialog(i) {
+  const b = boardItem(i.id);
+  openDialog("Work on " + i.id + " yourself", g => {
+    const ls = field(g, "Lease", inp("60m", "how long you hold it: 30m, 8h, 2d (up to 30d)"), false, "lease");
+    ls.focus();
+    ls.select();
+    g.append(el("div", "full w", "Same as `ait claim --lease`: the issue moves to In progress as yours (session \"dashboard\"), and agents skip it until you release it, close it, or the lease runs out. Any change you make from the dashboard renews the lease." + (b.stale ? " Its previous claim has expired, so this takes it over (--take)." : "")));
+    return () => {
+      const v = ls.value.trim().toLowerCase();
+      if (!/^\d+[mhdw]$/.test(v)) need(ls, "Use a number and a unit: 30m, 8h, 2d or 1w.");
+      const a = ["claim", i.id, "--lease", v];
+      if (b.stale) a.push("--take");
+      return a;
+    };
+  }, "Claim", a => [a, i.id + " is yours for " + a[3], () => showDetail(i.id)]);
 }
 function shipDialog(i) {
   openDialog("Release " + i.id, g => {
@@ -678,7 +708,7 @@ async function showDetail(id) {
     box.replaceChildren();
     const h = el("h2", null, i.id + "  " + i.title);
     box.append(h, el("span", "chip", i.state + (i.reason ? ": " + i.reason : "")));
-    if (v.claim && v.claim.session) box.append(el("span", "chip", "claimed by " + v.claim.session + " (gen " + v.claim.generation + ", " + v.claim.status + ")"));
+    if (v.claim && v.claim.session) box.append(el("span", "chip", "claimed by " + (v.claim.session === "dashboard" ? "you (dashboard)" : v.claim.session) + " (gen " + v.claim.generation + ", " + v.claim.status + (v.claim.lease_until ? ", lease " + ago(v.claim.lease_until) : "") + ")"));
     box.append(el("span", "chip", v.ready ? "ready" : "not offered"));
     box.append(el("span", "chip", i.type + " · " + i.priority));
     if (i.agent) box.append(el("span", "chip", "agent " + i.agent + (i.agent_model ? " (" + i.agent_model + ")" : "") + (i.effort ? ", effort " + i.effort : "")));
@@ -696,6 +726,8 @@ async function showDetail(id) {
       btn("Edit", "primary", () => editForm(box, i));
       btn("State…", null, () => stateDialog(i));
       if (!FINISHED.includes(i.state) && i.state !== "in_review" && i.type !== "review") btn("Submit for review", null, () => act(["state", i.id, "in_review"], i.id + " is in review", () => showDetail(i.id)));
+      if (!(v.claim && v.claim.status === "live") && !FINISHED.includes(i.state) && i.state !== "in_review") btn("Claim…", null, () => claimDialog(i));
+      if (v.claim && v.claim.session === "dashboard") btn("Release", null, () => act(releaseArgs(i), i.id + " released", () => showDetail(i.id)));
       if (!FINISHED.includes(i.state)) btn("Done…", null, () => doneDialog(i));
       if (i.state === "done" || (i.state !== "released" && v.rollup)) btn("Release…", null, () => shipDialog(i));
       btn("Top", null, () => act(["move", i.id, "--top"], i.id + " ranks first"));

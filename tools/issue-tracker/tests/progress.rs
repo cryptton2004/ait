@@ -299,7 +299,7 @@ fn dashboard_writes_pass_the_cli_gates_and_only_from_its_own_page() {
     // Only planning commands, and no options that pick files or identity.
     for args in [
         &["delete", "CORE-1-01"][..],
-        &["claim", "CORE-1-01"],
+        &["heartbeat"],
         &["import", "x.jsonl"],
         &["add", "CORE", "x", "--db", "other.db"],
         &["add", "CORE", "x", "--as", "a1"],
@@ -403,6 +403,35 @@ fn dashboard_writes_pass_the_cli_gates_and_only_from_its_own_page() {
     assert_eq!(nv["build"][0]["id"], "CORE-1-03");
     let (code, _) = post(port, &same, &["note", "CORE-1-03", "looked at it"]);
     assert_eq!(code, 200);
+
+    // The owner can take an issue from the dashboard with their own lease,
+    // close it with that claim's generation, and others are kept out.
+    let (code, v) = post(port, &same, &["claim", "CORE-1-02", "--lease", "2d"]);
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["result"]["claim"]["session"], "dashboard");
+    assert_eq!(v["result"]["claim"]["lease_minutes"], 2880);
+    assert_eq!(
+        t.err(Some("a9"), &["claim", "CORE-1-02"]).1,
+        "ALREADY_CLAIMED"
+    );
+    let (code, v) = post(port, &same, &["release", "CORE-1-02", "--gen", "1"]);
+    assert_eq!(code, 200, "{v}");
+    let (code, v) = post(port, &same, &["claim", "CORE-1-02", "--lease", "1h"]);
+    assert_eq!(code, 200, "{v}");
+    let (code, v) = post(
+        port,
+        &same,
+        &["done", "CORE-1-02", "--summary", "by hand", "--gen", "2"],
+    );
+    assert_eq!(code, 200, "{v}");
+    // An agent's live claim is not released from the dashboard without --force.
+    t.ok(Some("a1"), &["claim", "CORE-1-03"]);
+    let (code, v) = post(port, &same, &["release", "CORE-1-03"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (409, Some("NOT_CLAIMANT")),
+        "{v}"
+    );
 
     // Dashboard writes are recorded as the "dashboard" session.
     let v = t.ok(None, &["activity", "--issue", "CORE-1-03"]);
