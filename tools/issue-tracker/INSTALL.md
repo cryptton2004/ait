@@ -17,7 +17,7 @@ and `ait guide` print the same information from the program.
 - **Build:** from the issue-tracker repository root, run
   `cargo build --release`. The result is `target\release\ait.exe`.
 
-Check: `ait.exe version` prints `ait 0.1.0 (schema 2)` (or newer).
+Check: `ait.exe version` prints `ait 0.1.0 (schema 7)` (or newer).
 
 ## 2. Copy two files into the target repo
 
@@ -68,7 +68,7 @@ port = 7777
 ```
 
 Check, from the target repo root: `tools\ait\ait.exe init` prints
-`database ready: ...\.git\ait\tracker.db (schema 2)`.
+`database ready: ...\.git\ait\tracker.db (schema 7)`.
 
 ## 4. Load the backlog
 
@@ -79,8 +79,13 @@ Choose one of these:
   `tools\ait\ait.exe import --issues backlog.jsonl --prefix-for feature=EPIC,release=REL,milestone=MS`
   This needs an empty database. It checks every record first and writes
   nothing if any problem is found; the error lists every problem.
+  If you made the file for an older ait, read "What changed in the inventory
+  format" in README.md: new optional fields are `criteria` and `due`, and
+  `labels` now become real labels. An older file still imports as it is.
 - **From an `ait export`** of another database:
   `tools\ait\ait.exe import snapshot.jsonl`
+  Exports from an older ait import as they are (missing fields take their
+  defaults); exports from a newer ait are refused with `SCHEMA_TOO_NEW`.
 - **By hand:** `tools\ait\ait.exe add CORE "title" --priority P1 --body "..."`
 
 Check: `tools\ait\ait.exe check` prints `ok: N issues, no problems`, and

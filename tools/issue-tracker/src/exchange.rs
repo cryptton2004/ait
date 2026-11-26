@@ -448,6 +448,7 @@ const ISSUE_KEYS: &[&str] = &[
     "summary",
     "source",
     "criteria",
+    "due",
 ];
 
 pub fn import_issues(
@@ -648,6 +649,14 @@ pub fn import_issues(
                 errs.push(e.message);
             }
             let reviewer = str_field(o, "reviewer");
+            let due = match str_field(o, "due").map(issues::parse_due) {
+                None => None,
+                Some(Ok(d)) => d,
+                Some(Err(e)) => {
+                    errs.push(e.message);
+                    None
+                }
+            };
             let mut refs = |k: &str| -> Vec<String> {
                 match list_field(o, k) {
                     Err(e) => {
@@ -762,6 +771,12 @@ pub fn import_issues(
                 c.execute(
                     "UPDATE issues SET labels = ?2 WHERE id = ?1",
                     params![r.id, label_field],
+                )?;
+            }
+            if due.is_some() {
+                c.execute(
+                    "UPDATE issues SET due = ?2 WHERE id = ?1",
+                    params![r.id, due],
                 )?;
             }
             for n in needs {

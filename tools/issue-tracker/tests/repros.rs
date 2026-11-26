@@ -628,7 +628,7 @@ fn import_refuses_what_check_would_reject_and_writes_nothing() {
 }
 
 const INVENTORY: &str = r#"{"legacy": "docs/q.md#epic-w", "kind": "feature", "title": "Epic W", "body": "world", "state": "planned", "labels": ["wld"], "order": 90000, "source": "docs/q.md"}
-{"legacy": "docs/rel.md", "kind": "release", "title": "v1", "state": "planned"}
+{"legacy": "docs/rel.md", "kind": "release", "title": "v1", "state": "planned", "due": "2027-03-01"}
 {"legacy": "wld-1-00", "title": "W1", "parent": "docs/q.md#epic-w", "release": "docs/rel.md", "state": "ready", "priority": "P1", "agent": "deep", "order": 1}
 {"legacy": "wld-1-01", "title": "W2", "parent": "docs/q.md#epic-w", "needs": ["WLD-1-00"], "state": "done", "done_summary": "shipped", "order": 2}
 {"legacy": "wld-1-02", "title": "W3", "parent": "docs/q.md#epic-w", "needs": ["wld-1-01"], "relates": ["docs/rel.md"], "state": "blocked", "reason": "waits", "order": 3}
@@ -660,6 +660,9 @@ fn import_issues_loads_an_inventory() {
     assert_eq!(w1["issue"]["legacy"], Value::Null);
     assert_eq!(w1["issue"]["parent"], "EPIC-1-00");
     assert_eq!(w1["issue"]["release"], "REL-1-00");
+    let rel = ok(at(&t, &cfg, None, &["show", "REL-1-00"]));
+    assert_eq!(rel["issue"]["due"], "2027-03-01");
+    assert_eq!(w1["issue"]["due"], Value::Null);
     assert_eq!(w1["issue"]["priority"], "P1");
     assert_eq!(w1["issue"]["agent_model"], "opus");
     let w2 = ok(at(&t, &cfg, None, &["show", "WLD-1-01"]));
@@ -689,7 +692,7 @@ fn import_issues_lists_every_problem_before_writing() {
             "{\"legacy\": \"a\", \"title\": \"A\", \"needs\": [\"b\"]}\n",
             "{\"legacy\": \"b\", \"title\": \"B\", \"needs\": [\"a\"]}\n",
             "{\"legacy\": \"c\", \"state\": \"bogus\", \"title\": \"C\"}\n",
-            "{\"legacy\": \"d\", \"parent\": \"nowhere\", \"title\": \"D\"}\n",
+            "{\"legacy\": \"d\", \"parent\": \"nowhere\", \"title\": \"D\", \"due\": \"soon\"}\n",
             "{\"legacy\": \"A\", \"title\": \"dup legacy\"}\n",
             "{\"legacy\": \"e\"}\n",
             "{\"legacy\": \"f\", \"title\": \"F\", \"state\": \"blocked\"}\n",
@@ -713,6 +716,7 @@ fn import_issues_lists_every_problem_before_writing() {
     for want in [
         "line 3",
         "nowhere",
+        "due date 'soon'",
         "legacy 'A'",
         "title is missing",
         "needs --reason",

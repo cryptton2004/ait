@@ -143,10 +143,28 @@ in review, done and released.
 (default `ready`), `reason`, `parent`, `release`, `needs` and `relates`
 (lists), `labels` (list, appended to the body), `size`, `spec`, `order`,
 `priority` (default P2), `agent`, `effort`, `reviewer`, `done_summary`,
-`source` (appended to the body). `parent`, `release`, `needs` and `relates`
+`source` (appended to the body), `criteria` (list of acceptance criteria),
+`due` (`YYYY-MM-DD`, the expected date, mainly for releases). `parent`, `release`, `needs` and `relates`
 may name an id or any record's `legacy` value. A record's id is its `id`, else
 its `legacy` if that is a valid id, else the next free id under its type's
 prefix (`--prefix-for`, default `task=TASK,feature=FEAT,milestone=MS,release=REL`).
+Unknown fields are refused, so a misspelt field is reported, not lost.
+
+**What changed in the inventory format since the first import** (all
+optional; an older file still imports unchanged):
+
+| field | change |
+|---|---|
+| `criteria` | new: list of acceptance criteria. Finished issues get them checked |
+| `due` | new: expected date `YYYY-MM-DD` |
+| `labels` | valid lowercase labels (a-z, 0-9, `-`, `_`) now also become real labels for filtering; the body still keeps a "Labels:" line |
+| `state` | also accepts `in_review` and `released` |
+| `type` | also accepts `review` (give it a `parent`: the issue it reviews) |
+| `needs` | an entry may end in `:state` (for example `"CORE-1-00:in_review"`) to wait only until that state |
+
+To bring an existing inventory up to date, add these fields where you have
+the data and import into an empty database. The import checks the whole file
+first, lists every problem, and writes nothing until the file is valid.
 
 **Leases and generations:** a claim lasts `lease_minutes` (default 60), and
 every call by the claimant renews it. Each new claim of an issue gets the next
