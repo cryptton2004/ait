@@ -160,7 +160,7 @@ policy (see below), and close the connection.
 |---|---|
 | `/api/version` | `{"api": 1, "ait": "0.1.0", "schema": 4, "writable": true}` |
 | `/api/head` | `{"head": N}` — latest event `seq`; poll this cheaply and refetch when it changes |
-| `/api/issues` | `{"head", "issues": [board item], "wip": {"in_progress": N, "in_review": N, "agent.<tier>": N}}` (configured limits only; count live items yourself from `issues`) |
+| `/api/issues` | `{"head", "issues": [board item], "wip": {"in_progress": N, "in_review": N, "agent.<tier>": N}}` (configured limits only; count live items yourself from `issues`). Also `"agent_tiers": {tier: model}` (the configured `agent.<tier>` keys) |
 | `/api/issue/<ID>` | same object as `ait show --json` (50 notes) |
 | `/api/next` | `{"build": [issue], "frame": [issue]}` — top 10 of `next` and `next --frame` |
 | `/api/board` | same as `ait board --json` |
@@ -265,4 +265,4 @@ frame-ancestors 'self' <origins>`); without the setting every response says
 - **1** (2026-11-26): first published contract. Columns backlog → released,
   `in_review` / `released` states, review issues, `ship`, needs with
   `--until`, WIP limits, acceptance criteria, container auto-rollup, flow
-  stats, `allowed_origins`, `/api/version`, `/api/token`.
+  stats, `allowed_origins`, `/api/version`, `/api/token`. `/api/issues` gained `agent_tiers` (additive).

@@ -99,6 +99,9 @@ dialog h2 { font-size: 15px; margin: 0 0 10px; }
 #toast.err { border-left-color: var(--bad); }
 #toast > div:first-child { white-space: pre-line; }
 #toast .code { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
+input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 0 1px var(--bad); }
+.formerr { grid-column: 1 / -1; border: 1px solid var(--bad); border-left: 4px solid var(--bad); border-radius: 6px; padding: 6px 8px; margin: 8px 0; white-space: pre-line; overflow-wrap: anywhere; font-size: 13px; }
+.formerr .code { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -145,7 +148,7 @@ const TYPES = ["task", "review", "feature", "milestone", "release"];
 const FINISHED = ["done", "released"];
 const PRIORITIES = ["P0", "P1", "P2", "P3", "P4"];
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
-let wip = {}, head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
+let wip = {}, agentTiers = {}, head = -1, lastFull = 0, issues = [], nextIds = [], selected = null, dragId = null, staleOnly = false;
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -414,11 +417,67 @@ function renderRoadmap(v) {
 }
 
 // ---------------------------------------------------------------- forms
-function field(form, label, input, full) {
+// Every form field is registered under the name of its `ait` option, so a
+// refusal from the command line can point at the field it is about.
+function field(form, label, input, full, key) {
   const l = el("label", full ? "full" : null, label);
   form.append(l, input);
   if (full) input.classList.add("full");
+  form._fields = form._fields || {};
+  form._fields[key || label.toLowerCase()] = input;
+  input.addEventListener("input", () => input.classList.remove("bad"));
+  input.addEventListener("change", () => input.classList.remove("bad"));
   return input;
+}
+// A field that fails a check in the form: red, focused, with the reason.
+function bad(input, why) {
+  input.classList.add("bad");
+  input.title = why;
+  input.focus();
+  return why;
+}
+// Which fields a CLI error is about: a field named as --option or as
+// "unknown/invalid <option>", and any field whose value the message quotes.
+function fieldsForError(fields, err) {
+  const msg = err.message || "";
+  const lower = msg.toLowerCase();
+  const hit = new Set();
+  const quoted = [...msg.matchAll(/'([^']+)'/g)].map(m => m[1].toLowerCase());
+  for (const [key, input] of Object.entries(fields)) {
+    const v = (input.value || "").trim().toLowerCase();
+    if (lower.includes("--" + key) || new RegExp("\\b(unknown|invalid|bad|empty) " + key + "\\b").test(lower) || lower.startsWith(key + " ")) hit.add(input);
+    if (v && quoted.some(q => q === v || v.split(/[\s,]+/).map(x => x.split(":")[0]).includes(q))) hit.add(input);
+  }
+  if (["INVALID_ID", "UNKNOWN_PREFIX", "ID_TAKEN", "GROUP_FULL"].includes(err.code) && fields.id) hit.add(fields.id);
+  if (err.code === "NEEDS_REASON" && fields.reason) hit.add(fields.reason);
+  return [...hit];
+}
+// Shows a refusal inside the form (which stays open with everything typed)
+// and marks the fields it is about. `retry` re-sends with --force when the
+// command line offers that override.
+function showFormError(box, fields, err, args, retry) {
+  for (const input of Object.values(fields || {})) input.classList.remove("bad");
+  box.replaceChildren(el("div", null, err.message), el("div", "code", err.code));
+  if (retry && canForce(err, args)) {
+    const b = el("button", "danger", "Override (--force)");
+    b.type = "button";
+    b.addEventListener("click", () => retry(args.concat(["--force"])));
+    box.append(el("div", "w", "The command line asks for --force here. Only override if you mean to."), b);
+  }
+  box.hidden = false;
+  const marked = fieldsForError(fields || {}, err);
+  for (const input of marked) { input.classList.add("bad"); input.title = err.message; }
+  if (marked.length) marked[0].focus();
+  box.scrollIntoView({ block: "nearest" });
+}
+// Runs a form's command. On success: message, refresh, `after`. On a
+// refusal: throws, so the caller keeps its form open.
+async function submit(args, okMsg, after) {
+  const res = await run(args);
+  toast(okMsg || ("ait " + args[0] + " done"), false);
+  await refresh();
+  if (after) after(res);
+  return res;
 }
 function inp(value, placeholder) {
   const i = el("input");
@@ -437,6 +496,14 @@ function sel(options, value) {
   s.value = value || "";
   return s;
 }
+// The configured agent tiers as a list; free text when none are configured.
+function agentInput(value) {
+  const tiers = Object.keys(agentTiers);
+  if (!tiers.length) return inp(value, "tier, e.g. standard (optional)");
+  const opts = [["", "(none)"]].concat(tiers.map(t => [t, t + " (" + agentTiers[t] + ")"]));
+  if (value && !tiers.includes(value)) opts.push([value, value + " (not configured)"]);
+  return sel(opts, value);
+}
 function openDialog(title, build, submitLabel, onSubmit) {
   const dlg = document.getElementById("dlg");
   const form = document.getElementById("dlgform");
@@ -444,71 +511,99 @@ function openDialog(title, build, submitLabel, onSubmit) {
   const grid = el("div", "form");
   form.append(grid);
   const get = build(grid);
+  const errBox = el("div", "formerr");
+  errBox.hidden = true;
+  errBox.setAttribute("role", "alert");
+  form.append(errBox);
   const row = el("div", "row");
   const ok = el("button", "primary", submitLabel);
   ok.type = "button";
   const cancel = el("button", null, "Cancel");
   cancel.type = "button";
   cancel.addEventListener("click", () => dlg.close());
-  ok.addEventListener("click", async () => {
-    const args = get();
-    if (!args) return;
-    dlg.close();
-    await onSubmit(args);
+  // The dialog closes only when the command succeeds; a refusal is shown
+  // in the dialog with the bad fields in red, and nothing typed is lost.
+  const send = async args => {
+    ok.disabled = true;
+    try {
+      const [cmd, okMsg, after] = onSubmit(args);
+      await submit(cmd, okMsg, after);
+      dlg.close();
+    } catch (e) {
+      showFormError(errBox, grid._fields, e, args, send);
+    } finally {
+      ok.disabled = false;
+    }
+  };
+  ok.addEventListener("click", () => {
+    for (const input of Object.values(grid._fields || {})) input.classList.remove("bad");
+    errBox.hidden = true;
+    let args;
+    try { args = get(); } catch (why) {
+      errBox.replaceChildren(el("div", null, String(why)));
+      errBox.hidden = false;
+      return;
+    }
+    if (args) send(args);
   });
   row.append(ok, cancel);
   form.append(row);
   dlg.showModal();
 }
+// Form checks before anything is sent. `need(input, why)` throws, which
+// the dialog shows next to the field.
+function need(input, why) { throw bad(input, why); }
+const ID_RE = /^[A-Za-z]{2,5}(-\d+(-\d{2})?)?$/;
 function stateDialog(i, preset) {
   openDialog("Change state of " + i.id, g => {
     const st = field(g, "State", sel(STATES, preset || i.state));
     const rs = field(g, "Reason", inp(i.reason, "needed for blocked, decision and dropped"));
+    st.focus();
     g.append(el("div", "full w", "Same rules as `ait state`: the last three states need a reason; done issues reopen only with --force; use Done to close."));
     return () => {
-      if (NEEDS_REASON.includes(st.value) && !rs.value.trim()) { rs.focus(); rs.placeholder = "a reason is required for " + st.value; return null; }
+      if (NEEDS_REASON.includes(st.value) && !rs.value.trim()) need(rs, "A reason is required for " + st.value + ".");
       const a = ["state", i.id, st.value];
       if (rs.value.trim()) a.push("--reason", rs.value.trim());
       return a;
     };
-  }, "Change state", a => act(a, i.id + " is " + a[2], () => showDetail(i.id)));
+  }, "Change state", a => [a, i.id + " is " + a[2], () => showDetail(i.id)]);
 }
 function doneDialog(i) {
   openDialog("Close " + i.id + " as done", g => {
-    const sm = field(g, "Summary", el("textarea"), true);
+    const sm = field(g, "Summary", el("textarea"), true, "summary");
     sm.style.minHeight = "80px";
     sm.placeholder = "what was delivered (required)";
-    const ran = field(g, "Ran", inp("", "what actually did the work, e.g. sonnet, effort high (optional)"));
+    const ran = field(g, "Ran", inp("", "what actually did the work, e.g. sonnet, effort high (optional)"), false, "ran");
     g.append(el("div", "full w", "Same rules as `ait done`: a summary is required; closing needs the live claim, so from here the command line's refusal is shown and you can override it with --force."));
     return () => {
-      if (!sm.value.trim()) { sm.focus(); return null; }
+      if (!sm.value.trim()) need(sm, "A summary of what was delivered is required.");
       const a = ["done", i.id, "--summary", sm.value.trim()];
       if (ran.value.trim()) a.push("--ran", ran.value.trim());
       return a;
     };
-  }, "Close as done", a => act(a, i.id + " is done", () => showDetail(i.id)));
+  }, "Close as done", a => [a, i.id + " is done", () => showDetail(i.id)]);
 }
 function shipDialog(i) {
   openDialog("Release " + i.id, g => {
-    const rf = field(g, "Reference", inp("", "tag or commit, e.g. v1.2 (optional)"));
+    const rf = field(g, "Reference", inp("", "tag or commit, e.g. v1.2 (optional)"), false, "ref");
     g.append(el("div", "full w", "Same rules as `ait ship`: every member must be done, each task merged on main with its Issue-ID trailer, and pushed to origin when a remote exists. The refusal is shown if not."));
     return () => {
       const a = ["ship", i.id];
       if (rf.value.trim()) a.push("--ref", rf.value.trim());
       return a;
     };
-  }, "Release", a => act(a, i.id + " released", () => showDetail(i.id)));
+  }, "Release", a => [a, i.id + " released", () => showDetail(i.id)]);
 }
 function newDialog() {
   const prefixes = [...new Set(issues.map(x => x.id.split("-")[0]))].sort();
   openDialog("New issue", g => {
-    const pf = field(g, "Prefix or id", inp("", "e.g. CORE, CORE-2 or CORE-2-05"));
+    const pf = field(g, "Prefix or id", inp("", "e.g. CORE, CORE-2 or CORE-2-05"), false, "id");
     const dl = el("datalist");
     dl.id = "prefixes";
     for (const p of prefixes) { const o = el("option"); o.value = p; dl.append(o); }
     g.append(dl);
     pf.setAttribute("list", "prefixes");
-    const ti = field(g, "Title", inp("", "one line (required)"));
+    const ti = field(g, "Title", inp("", "one line (required)"), false, "title");
     const ty = field(g, "Type", sel(TYPES, "task"));
     const pr = field(g, "Priority", sel(PRIORITIES, "P2"));
     const st = field(g, "State", sel(STATES, "ready"));
@@ -516,24 +611,28 @@ function newDialog() {
     const pa = field(g, "Parent", inp("", "feature id (optional)"));
     const rl = field(g, "Release", inp("", "release or milestone id (optional)"));
     const nd = field(g, "Needs", inp("", "ids, comma separated; ID:in_review waits for that state"));
-    const ag = field(g, "Agent", inp("", "tier, e.g. standard (optional)"));
+    const ag = field(g, "Agent", agentInput(""), false, "agent");
     const ef = field(g, "Effort", sel(EFFORTS, ""));
-    const ac = field(g, "Acceptance criteria", el("textarea"), true);
+    const ac = field(g, "Acceptance criteria", el("textarea"), true, "criteria");
     ac.placeholder = "one per line; all must be checked before review or done";
     ac.style.minHeight = "60px";
-    const bd = field(g, "Description", el("textarea"), true);
+    const bd = field(g, "Description", el("textarea"), true, "body");
     bd.placeholder = "Markdown";
+    pf.focus();
     return () => {
-      if (!pf.value.trim()) { pf.focus(); return null; }
-      if (!ti.value.trim()) { ti.focus(); return null; }
-      if (NEEDS_REASON.includes(st.value) && !rs.value.trim()) { rs.focus(); rs.placeholder = "a reason is required for " + st.value; return null; }
+      if (!pf.value.trim()) need(pf, "A prefix (CORE), group (CORE-2) or full id (CORE-2-05) is required.");
+      if (!ID_RE.test(pf.value.trim())) need(pf, "'" + pf.value.trim() + "' is not a prefix (2-5 letters), group (CORE-2) or id (CORE-2-05).");
+      if (!ti.value.trim()) need(ti, "A title is required.");
+      if (NEEDS_REASON.includes(st.value) && !rs.value.trim()) need(rs, "A reason is required for " + st.value + ".");
+      if (["done", "released", "in_review"].includes(st.value)) need(st, "New issues cannot start as " + st.value + ".");
+      if (ty.value === "review" && !pa.value.trim()) need(pa, "A review needs a parent: the issue it reviews.");
       const a = ["add", pf.value.trim(), ti.value.trim(), "--type", ty.value, "--priority", pr.value, "--state", st.value];
       const opt = (name, v) => { if (v.trim()) a.push("--" + name, v.trim()); };
       opt("reason", rs.value); opt("parent", pa.value); opt("release", rl.value); opt("needs", nd.value);
       opt("agent", ag.value); opt("effort", ef.value); opt("criteria", ac.value); opt("body", bd.value);
       return a;
     };
-  }, "Add issue", a => act(a, "issue added", res => { if (res && res.issue) showDetail(res.issue.id); }));
+  }, "Add issue", a => [a, "issue added", res => { if (res && res.issue) showDetail(res.issue.id); }]);
 }
 
 // ---------------------------------------------------------------- detail
@@ -628,17 +727,21 @@ function editForm(box, i) {
     title: field(g, "Title", inp(i.title)),
     priority: field(g, "Priority", sel(PRIORITIES, i.priority)),
     type: field(g, "Type", sel(TYPES, i.type)),
-    agent: field(g, "Agent", inp(i.agent, "tier")),
+    agent: field(g, "Agent", agentInput(i.agent || "")),
     effort: field(g, "Effort", sel(EFFORTS, i.effort || "")),
     reviewer: field(g, "Reviewer", inp(i.reviewer)),
     parent: field(g, "Parent", inp(i.parent)),
     release: field(g, "Release", inp(i.release)),
     size: field(g, "Size", inp(i.size)),
     spec: field(g, "Spec", inp(i.spec)),
-    body: field(g, "Description", el("textarea"), true),
+    body: field(g, "Description", el("textarea"), true, "body"),
   };
   f.body.value = i.body || "";
   f.body.style.minHeight = "220px";
+  const errBox = el("div", "formerr");
+  errBox.hidden = true;
+  errBox.setAttribute("role", "alert");
+  box.append(errBox);
   const row = el("div", "row");
   const save = el("button", "primary", "Save");
   const cancel = el("button", null, "Cancel");
@@ -653,7 +756,18 @@ function editForm(box, i) {
       if (now !== before) a.push("--" + k, now);
     }
     if (a.length === 4) { showDetail(i.id); return; }
-    act(a, i.id + " saved", () => showDetail(i.id));
+    for (const input of Object.values(f)) input.classList.remove("bad");
+    errBox.hidden = true;
+    if (!f.title.value.trim()) { errBox.replaceChildren(el("div", null, bad(f.title, "The title cannot be empty."))); errBox.hidden = false; return; }
+    if (f.type.value === "review" && !f.parent.value.trim()) { errBox.replaceChildren(el("div", null, bad(f.parent, "A review needs a parent: the issue it reviews."))); errBox.hidden = false; return; }
+    // The form stays open with everything typed until the save succeeds.
+    const send = async args => {
+      save.disabled = true;
+      try { await submit(args, i.id + " saved", () => showDetail(i.id)); }
+      catch (e) { showFormError(errBox, g._fields, e, args, send); }
+      finally { save.disabled = false; }
+    };
+    send(a);
   });
   row.append(save, cancel);
   box.append(row);
@@ -667,6 +781,7 @@ async function refresh() {
   renderStats(sv);
   issues = iv.issues;
   wip = iv.wip || {};
+  agentTiers = iv.agent_tiers || {};
   renderNext(nv);
   renderColumns();
   renderFeed(av.events);

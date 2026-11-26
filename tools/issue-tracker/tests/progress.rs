@@ -495,6 +495,9 @@ fn allowed_origin_can_write_through_the_same_gates() {
     let ui = "Origin: http://localhost:5173\r\n";
 
     // Version endpoint (no origin needed).
+    let (_, v) = get(port, "/api/issues");
+    let v: serde_json::Value = serde_json::from_str(&v).unwrap();
+    assert!(v["agent_tiers"].is_object(), "{v}");
     let (code, v) = get(port, "/api/version");
     let v: serde_json::Value = serde_json::from_str(&v).unwrap();
     assert_eq!(code, 200);

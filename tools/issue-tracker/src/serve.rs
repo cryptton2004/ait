@@ -627,5 +627,12 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
         .iter()
         .map(|(k, n)| (k.clone(), json!(n)))
         .collect();
-    Ok(json!({"issues": rows, "head": board::head(c)?, "wip": wip}))
+    // Configured agent tiers (tier -> model), so forms can offer only those.
+    let tiers: serde_json::Map<String, Value> = env
+        .cfg
+        .agents
+        .iter()
+        .map(|(k, m)| (k.clone(), json!(m)))
+        .collect();
+    Ok(json!({"issues": rows, "head": board::head(c)?, "wip": wip, "agent_tiers": tiers}))
 }
