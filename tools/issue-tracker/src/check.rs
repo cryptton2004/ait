@@ -12,7 +12,9 @@ use crate::claims;
 use crate::db::{self, Env};
 use crate::error::{AitError, Result};
 use crate::ids;
-use crate::issues::{EFFORTS, LINK_KINDS, NEEDS_REASON, PRIORITIES, STATES, TYPES};
+use crate::issues::{
+    EFFORTS, FINISHED, LINK_KINDS, NEEDS_REASON, PRIORITIES, STATES, TYPES, UNTIL_STATES,
+};
 use crate::output::{Output, line, s};
 use rusqlite::Connection;
 use rusqlite::types::Value as Sql;
@@ -116,7 +118,7 @@ pub fn trailer_ids(message: &str, trailer: &str) -> Vec<String> {
 }
 
 /// Merged ids (id -> merge sha) from first-parent merges of `rev` in `repo`.
-fn git_merged(
+pub fn git_merged(
     repo: &Path,
     rev: &str,
     trailer: &str,
@@ -242,6 +244,13 @@ pub fn run_checks(c: &Connection, env: &Env, opt: &Checks) -> Result<(Vec<Value>
             }
         }
         let kind = r[5].clone().unwrap_or_default();
+        if kind == "review" && r[3].is_none() {
+            p.push(problem(
+                "REVIEW_NO_PARENT",
+                Some(&id),
+                format!("{id} is a review with no parent issue to review"),
+            ));
+        }
         if !TYPES.contains(&kind.as_str()) {
             p.push(problem(
                 "BAD_TYPE",
@@ -300,8 +309,20 @@ pub fn run_checks(c: &Connection, env: &Env, opt: &Checks) -> Result<(Vec<Value>
     let mut needs: HashMap<String, Vec<String>> = HashMap::new();
     for r in strings(
         c,
-        "SELECT src, kind, dst FROM links ORDER BY src, kind, dst",
+        "SELECT src, kind, dst, until_state FROM links ORDER BY src, kind, dst",
     )? {
+        if let Some(u) = &r[3]
+            && (!UNTIL_STATES.contains(&u.as_str()) || r[1].as_deref() != Some("needs"))
+        {
+            p.push(problem(
+                "BAD_LINK",
+                r[0].as_deref(),
+                format!(
+                    "link {} waits for '{u}', which is not allowed",
+                    r[0].clone().unwrap_or_default()
+                ),
+            ));
+        }
         let (src, kind, dst) = (
             r[0].clone().unwrap_or_default(),
             r[1].clone().unwrap_or_default(),
@@ -348,11 +369,13 @@ pub fn run_checks(c: &Connection, env: &Env, opt: &Checks) -> Result<(Vec<Value>
                 Some(&id),
                 format!("claim for missing issue {id}"),
             )),
-            Some(st @ ("done" | "dropped")) if r[2].is_some() => p.push(problem(
-                "CLAIM_ON_CLOSED",
-                Some(&id),
-                format!("{id} is {st} but still claimed"),
-            )),
+            Some(st @ ("done" | "dropped" | "released" | "in_review")) if r[2].is_some() => {
+                p.push(problem(
+                    "CLAIM_ON_CLOSED",
+                    Some(&id),
+                    format!("{id} is {st} but still claimed"),
+                ))
+            }
             _ => {}
         }
     }
@@ -378,29 +401,11 @@ pub fn run_checks(c: &Connection, env: &Env, opt: &Checks) -> Result<(Vec<Value>
     Ok((p, i64::try_from(all.len()).unwrap_or(0)))
 }
 
-fn git_checks(c: &Connection, env: &Env, repo: Option<&Path>, p: &mut Vec<Value>) -> Result<()> {
-    let repo = repo
-        .map(Path::to_path_buf)
-        .or_else(|| env.cfg.repo_dir(&env.db_path));
-    let Some(repo) = repo else {
-        p.push(problem(
-            "GIT",
-            None,
-            "check --git needs the repository: set repo = in default.cfg or pass --repo <path>"
-                .to_string(),
-        ));
-        return Ok(());
-    };
-    let merged = match git_merged(&repo, &env.cfg.main_branch, &env.cfg.trailer) {
-        Ok(m) => m,
-        Err(e) => {
-            p.push(problem("GIT", None, e));
-            return Ok(());
-        }
-    };
+/// Ids listed in `git_baseline` (done before ait tracked merges).
+pub fn load_baseline(env: &Env, repo: &Path, p: &mut Vec<Value>) -> Result<HashSet<String>> {
     let mut baseline: HashSet<String> = HashSet::new();
     if let Some(src) = &env.cfg.git_baseline {
-        match src.read(Some(&repo))? {
+        match src.read(Some(repo))? {
             None => p.push(problem(
                 "BASELINE",
                 None,
@@ -426,17 +431,45 @@ fn git_checks(c: &Connection, env: &Env, repo: Option<&Path>, p: &mut Vec<Value>
             }
         }
     }
-    let states: HashMap<String, String> = strings(c, "SELECT id, state FROM issues ORDER BY id")?
-        .into_iter()
-        .filter_map(|r| Some((r[0].clone()?, r[1].clone().unwrap_or_default())))
-        .collect();
+    Ok(baseline)
+}
+
+fn git_checks(c: &Connection, env: &Env, repo: Option<&Path>, p: &mut Vec<Value>) -> Result<()> {
+    let repo = repo
+        .map(Path::to_path_buf)
+        .or_else(|| env.cfg.repo_dir(&env.db_path));
+    let Some(repo) = repo else {
+        p.push(problem(
+            "GIT",
+            None,
+            "check --git needs the repository: set repo = in default.cfg or pass --repo <path>"
+                .to_string(),
+        ));
+        return Ok(());
+    };
+    let merged = match git_merged(&repo, &env.cfg.main_branch, &env.cfg.trailer) {
+        Ok(m) => m,
+        Err(e) => {
+            p.push(problem("GIT", None, e));
+            return Ok(());
+        }
+    };
+    let baseline = load_baseline(env, &repo, p)?;
+    // Only tasks are merged; containers and reviews have no merge of their own.
+    let states: HashMap<String, String> = strings(
+        c,
+        "SELECT id, state FROM issues WHERE type = 'task' ORDER BY id",
+    )?
+    .into_iter()
+    .filter_map(|r| Some((r[0].clone()?, r[1].clone().unwrap_or_default())))
+    .collect();
     let mut ids: Vec<&String> = states.keys().collect();
     ids.sort();
     for id in ids {
         let state = &states[id];
         let up = id.to_ascii_uppercase();
         let is_merged = merged.contains_key(&up) || baseline.contains(&up);
-        if state == "done" && !is_merged {
+        if FINISHED.contains(&state.as_str()) && !is_merged {
             p.push(problem(
                 "DONE_NOT_MERGED",
                 Some(id),
@@ -446,7 +479,7 @@ fn git_checks(c: &Connection, env: &Env, repo: Option<&Path>, p: &mut Vec<Value>
                 ),
             ));
         }
-        if state != "done"
+        if !FINISHED.contains(&state.as_str())
             && let Some(sha) = merged.get(&up)
         {
             p.push(problem(

@@ -230,8 +230,8 @@ fn check_passes_on_clean_data_and_reports_corruption() {
     {
         let c = rusqlite::Connection::open(t.db()).unwrap();
         c.execute_batch(
-            "INSERT INTO links VALUES ('CORE-1-00', 'needs', 'CORE-1-01');
-             INSERT INTO links VALUES ('CORE-1-00', 'relates', 'GONE-1-00');
+            "INSERT INTO links(src, kind, dst) VALUES ('CORE-1-00', 'needs', 'CORE-1-01');
+             INSERT INTO links(src, kind, dst) VALUES ('CORE-1-00', 'relates', 'GONE-1-00');
              UPDATE issues SET state = 'blocked', reason = NULL WHERE id = 'CORE-1-01';",
         )
         .unwrap();

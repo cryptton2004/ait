@@ -147,25 +147,39 @@ pub fn blockers(c: &Connection, env: &Env, ap: &Approvals, id: &str) -> Result<V
         };
         out.push(json!({"code": "STATE", "message": msg, "state": state}));
     }
-    if kind != "task" {
+    if kind != "task" && kind != "review" {
         out.push(json!({
             "code": "TYPE",
-            "message": format!("it is a {kind}; next offers tasks (use next --type {kind})"),
+            "message": format!("it is a {kind}; next offers tasks and reviews (use next --type {kind})"),
         }));
     }
-    let mut st = c.prepare(
-        "SELECT l.dst, d.state FROM links l LEFT JOIN issues d ON d.id = l.dst
-         WHERE l.src = ?1 AND l.kind = 'needs' AND (d.state IS NULL OR d.state <> 'done')
-         ORDER BY l.dst",
-    )?;
-    let open: Vec<(String, Option<String>)> = st
-        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+    if kind == "review"
+        && let Some(w) = review_wait(c, id)?
+    {
+        out.push(json!({"code": "REVIEW_WAITS", "message": w}));
+    }
+    let sql = format!(
+        "SELECT l.dst, d.state, COALESCE(l.until_state, 'done') FROM links l
+         LEFT JOIN issues d ON d.id = l.dst
+         WHERE l.src = ?1 AND l.kind = 'needs' AND {} ORDER BY l.dst",
+        issues::need_unmet_sql()
+    );
+    let mut st = c.prepare(&sql)?;
+    let open: Vec<(String, Option<String>, String)> = st
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     if !open.is_empty() {
-        let ids: Vec<&str> = open.iter().map(|(i, _)| i.as_str()).collect();
+        let ids: Vec<&str> = open.iter().map(|(i, _, _)| i.as_str()).collect();
         let desc: Vec<String> = open
             .iter()
-            .map(|(i, s)| format!("{i} ({})", s.as_deref().unwrap_or("missing")))
+            .map(|(i, s, u)| {
+                let st = s.as_deref().unwrap_or("missing");
+                if u == "done" {
+                    format!("{i} ({st})")
+                } else {
+                    format!("{i} to be {u} ({st})")
+                }
+            })
             .collect();
         out.push(json!({
             "code": "NEEDS",
@@ -197,6 +211,69 @@ pub fn blockers(c: &Connection, env: &Env, ap: &Approvals, id: &str) -> Result<V
     Ok(out)
 }
 
+/// Why a review cannot start yet: its parent must be in review.
+pub fn review_wait(c: &Connection, id: &str) -> Result<Option<String>> {
+    let parent: Option<(String, String)> = c
+        .query_row(
+            "SELECT p.id, p.state FROM issues i JOIN issues p ON p.id = i.parent WHERE i.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match parent {
+        None => Some("a review needs a parent issue to review".to_string()),
+        Some((p, st)) if st != "in_review" => {
+            Some(format!("reviews start when {p} is in review (it is {st})"))
+        }
+        Some(_) => None,
+    })
+}
+
+/// Reviews of `id` that are not finished yet.
+pub fn open_reviews(c: &Connection, id: &str) -> Result<(i64, Vec<String>)> {
+    let mut st = c.prepare(
+        "SELECT id, state FROM issues WHERE parent = ?1 AND type = 'review' AND state <> 'dropped'
+         ORDER BY ord, id",
+    )?;
+    let rows: Vec<(String, String)> = st
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let open = rows
+        .iter()
+        .filter(|(_, s)| !issues::FINISHED.contains(&s.as_str()))
+        .map(|(i, _)| i.clone())
+        .collect();
+    Ok((i64::try_from(rows.len()).unwrap_or(0), open))
+}
+
+/// Moving `id` to in_review hands the work over: the claim is released.
+pub fn submit_for_review(c: &Connection, env: &Env, id: &str, force: bool) -> Result<()> {
+    let kind: String = c.query_row("SELECT type FROM issues WHERE id = ?1", [id], |r| r.get(0))?;
+    if kind == "review" {
+        return Err(AitError::new(
+            "INVALID_STATE",
+            format!("{id} is a review; finish it with `ait done`"),
+        ));
+    }
+    if let Some(r) = claim_row(c, id)?
+        && r.session.is_some()
+    {
+        c.execute(
+            "UPDATE claims SET session = NULL, lease_until = NULL WHERE issue = ?1",
+            [id],
+        )?;
+        db::event(
+            c,
+            env,
+            Some(id),
+            "release",
+            json!({"previous": r.session, "generation": r.generation, "forced": force,
+                   "why": "submitted for review"}),
+        )?;
+    }
+    Ok(())
+}
+
 /// Filters for `next`.
 #[derive(Default)]
 pub struct Pick {
@@ -222,11 +299,14 @@ pub fn candidates(c: &Connection, env: &Env, ap: &Approvals, p: &Pick) -> Result
          WHERE i.state = 'ready'
            AND NOT EXISTS (
                SELECT 1 FROM links l LEFT JOIN issues d ON d.id = l.dst
-               WHERE l.src = i.id AND l.kind = 'needs' AND (d.state IS NULL OR d.state <> 'done'))
+               WHERE l.src = i.id AND l.kind = 'needs' AND NEED_UNMET)
+           AND (i.type <> 'review' OR EXISTS (
+               SELECT 1 FROM issues p WHERE p.id = i.parent AND p.state = 'in_review'))
            AND (c.session IS NULL OR (?1 AND c.lease_until <= ?2))
          ORDER BY i.priority, i.ord, i.id"
     };
-    let mut st = c.prepare(sql)?;
+    let sql = sql.replace("NEED_UNMET", &issues::need_unmet_sql());
+    let mut st = c.prepare(&sql)?;
     type Row = (String, Option<String>, String, String);
     let rows: Vec<Row> = st
         .query_map(params![p.include_stale, env.now], |r| {
@@ -235,11 +315,10 @@ pub fn candidates(c: &Connection, env: &Env, ap: &Approvals, p: &Pick) -> Result
         .collect::<rusqlite::Result<_>>()?;
     let t = today(env);
     let scope = if p.frame { "frame" } else { "build" };
-    let want_kind = p.kind.as_deref().unwrap_or("task");
     Ok(rows
         .into_iter()
         .filter(|(id, agent, prio, kind)| {
-            (p.frame || kind == want_kind)
+            (p.frame || p.kind.is_some() || kind == "task" || kind == "review")
                 && p.kind.as_deref().is_none_or(|k| k == kind)
                 && p.prefix.as_ref().is_none_or(|x| id.starts_with(x.as_str()))
                 && p.agent
@@ -274,11 +353,22 @@ pub fn ready_ids(
 fn do_claim(c: &Connection, env: &Env, id: &str, take: bool) -> Result<Value> {
     let me = env.require_session()?;
     let state = issues::state_of(c, id)?;
-    if state == "done" || state == "dropped" {
+    if ["done", "dropped", "released", "in_review"].contains(&state.as_str()) {
+        let hint = if state == "in_review" {
+            "; claim its review issues instead"
+        } else {
+            ""
+        };
         return Err(AitError::new(
             "INVALID_STATE",
-            format!("{id} is {state} and cannot be claimed"),
+            format!("{id} is {state} and cannot be claimed{hint}"),
         ));
+    }
+    let kind: String = c.query_row("SELECT type FROM issues WHERE id = ?1", [id], |r| r.get(0))?;
+    if kind == "review"
+        && let Some(w) = review_wait(c, id)?
+    {
+        return Err(AitError::new("REVIEW_NOT_STARTED", w));
     }
     let prev = claim_row(c, id)?;
     let lease_until = env.now + env.lease_ms();
@@ -612,10 +702,32 @@ pub fn cmd_done(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     let issue = db::write(c, |c| {
         let id = issues::resolve(c, input)?;
         let state = issues::state_of(c, &id)?;
-        if state == "done" {
+        if issues::FINISHED.contains(&state.as_str()) {
             return Err(AitError::new(
                 "ALREADY_DONE",
-                format!("{id} is already done"),
+                format!("{id} is already {state}"),
+            ));
+        }
+        let (n_reviews, open) = open_reviews(c, &id)?;
+        if !open.is_empty() && !force {
+            let hint = if state == "in_review" {
+                String::new()
+            } else {
+                format!("; submit it first with `ait state {id} in_review`")
+            };
+            return Err(AitError::new(
+                "REVIEWS_OPEN",
+                format!("{id} has open reviews: {}{hint}", open.join(", ")),
+            ));
+        }
+        // Reviewed work is closed by its passed reviews, not by a claim.
+        let reviewed = state == "in_review" && n_reviews > 0;
+        if state == "in_review" && n_reviews == 0 && !force {
+            return Err(AitError::new(
+                "REVIEWS_OPEN",
+                format!(
+                    "{id} is in review with no review issues; add them (ait add ... --type review --parent {id}) or close it as the owner with --force"
+                ),
             ));
         }
         if NOT_DONEABLE.contains(&state.as_str()) && !force {
@@ -628,7 +740,7 @@ pub fn cmd_done(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         }
         let row = claim_row(c, &id)?;
         check_gen(row.as_ref(), &id, want)?;
-        if !force {
+        if !force && !reviewed {
             require_claimant(env, row.as_ref(), &id, false)?;
             if row.as_ref().is_some_and(|r| !r.live(env.now)) {
                 return Err(AitError::new(
@@ -678,8 +790,8 @@ pub fn cmd_heartbeat(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             require_claimant(env, row.as_ref(), &id, false)?;
         }
         c.execute(
-            "UPDATE claims SET lease_until = ?2 WHERE session = ?1",
-            params![me, lease_until],
+            "UPDATE claims SET lease_until = ?2 WHERE session = ?1 AND lease_until > ?3",
+            params![me, lease_until, env.now],
         )?;
         let mut st = c.prepare(
             "SELECT issue, session, generation, claimed_at, lease_until FROM claims

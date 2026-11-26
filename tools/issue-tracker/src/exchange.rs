@@ -52,11 +52,18 @@ const TABLES: &[(&str, &str, &[&str], &str)] = &[
             "reviewer",
             "release",
             "ran",
+            "released_at",
+            "release_ref",
         ],
         "id",
     ),
     ("retired", "retired_ids", &["id", "at"], "id"),
-    ("link", "links", &["src", "kind", "dst"], "src, kind, dst"),
+    (
+        "link",
+        "links",
+        &["src", "kind", "dst", "until_state"],
+        "src, kind, dst",
+    ),
     (
         "claim",
         "claims",
@@ -577,7 +584,7 @@ pub fn import_issues(
             }
         }
         let resolve = |r: &str| by_ref.get(&r.to_lowercase()).cloned();
-        let mut links: Vec<(String, &'static str, String)> = Vec::new();
+        let mut links: Vec<(String, &'static str, String, Option<String>)> = Vec::new();
         let mut inserted = 0;
         for r in &recs {
             let o = &r.v;
@@ -630,7 +637,16 @@ pub fn import_issues(
                     }
                     Ok(v) => v
                         .iter()
-                        .filter_map(|x| match resolve(x) {
+                        .map(|x| {
+                            // `ref:state` waits for that state (needs only).
+                            let (r, until) = issues::split_until(x);
+                            let found = resolve(r).map(|id| match until {
+                                Some(u) => format!("{id}:{u}"),
+                                None => id,
+                            });
+                            (found, x)
+                        })
+                        .filter_map(|(found, x)| match found {
                             Some(id) => Some(id),
                             None => {
                                 errs.push(format!("{k} '{x}' matches no record in the file"));
@@ -715,16 +731,21 @@ pub fn import_issues(
                 }
             }
             for n in needs {
-                links.push((r.id.clone(), "needs", n));
+                let (id, until) = match n.split_once(':') {
+                    Some((i, u)) => (i.to_string(), Some(u.to_string())),
+                    None => (n, None),
+                };
+                links.push((r.id.clone(), "needs", id, until));
             }
             for n in relates {
-                links.push((r.id.clone(), "relates", n));
+                let id = n.split(':').next().unwrap_or_default().to_string();
+                links.push((r.id.clone(), "relates", id, None));
             }
         }
-        for (src, kind, dst) in &links {
+        for (src, kind, dst, until) in &links {
             c.execute(
-                "INSERT OR IGNORE INTO links(src, kind, dst) VALUES (?1, ?2, ?3)",
-                params![src, kind, dst],
+                "INSERT OR IGNORE INTO links(src, kind, dst, until_state) VALUES (?1, ?2, ?3, ?4)",
+                params![src, kind, dst, until.as_deref().filter(|u| *u != "done")],
             )?;
         }
         post_checks(c, env, &mut problems)?;

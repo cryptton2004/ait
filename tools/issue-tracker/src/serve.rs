@@ -31,7 +31,7 @@ pub const DASHBOARD_SESSION: &str = "dashboard";
 /// Commands the dashboard may run. Everything else (claims, delete, import,
 /// serve, backup...) stays on the command line.
 const WRITE_COMMANDS: &[&str] = &[
-    "add", "edit", "state", "move", "done", "note", "link", "unlink",
+    "add", "edit", "state", "move", "done", "note", "link", "unlink", "ship",
 ];
 
 /// Options a dashboard request may not pass (they would pick another

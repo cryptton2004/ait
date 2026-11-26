@@ -16,21 +16,55 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 pub const STATES: &[&str] = &[
-    "idea", "planned", "ready", "blocked", "decision", "dropped", "done",
+    "idea",
+    "planned",
+    "ready",
+    "blocked",
+    "decision",
+    "dropped",
+    "in_review",
+    "done",
+    "released",
 ];
+/// States that count as finished work.
+pub const FINISHED: &[&str] = &["done", "released"];
+/// States a `needs` link may wait for (`--needs ID:in_review`).
+pub const UNTIL_STATES: &[&str] = &["planned", "ready", "in_review", "done", "released"];
+
+/// SQL rank of a state for "has reached": idea < planned < ready (and
+/// blocked, decision) < in_review < done < released; dropped never reaches.
+pub fn rank_sql(expr: &str) -> String {
+    format!(
+        "(CASE {expr} WHEN 'idea' THEN 0 WHEN 'planned' THEN 1 WHEN 'ready' THEN 2 \
+         WHEN 'blocked' THEN 2 WHEN 'decision' THEN 2 WHEN 'in_review' THEN 3 \
+         WHEN 'done' THEN 4 WHEN 'released' THEN 5 ELSE -1 END)"
+    )
+}
+
+/// SQL condition, over `links l` joined to the needed issue `d`: the need is
+/// not met yet.
+pub fn need_unmet_sql() -> String {
+    format!(
+        "(d.state IS NULL OR {} < {})",
+        rank_sql("d.state"),
+        rank_sql("COALESCE(l.until_state, 'done')")
+    )
+}
 pub const NEEDS_REASON: &[&str] = &["blocked", "decision", "dropped"];
 pub const LINK_KINDS: &[&str] = &["needs", "relates", "discovered_from"];
 /// Issue types. Releases and milestones can be the `release` of other issues.
-pub const TYPES: &[&str] = &["task", "feature", "milestone", "release"];
+/// `review` issues are checks (code, security, legal...) on their parent:
+/// they start only while the parent is `in_review`.
+pub const TYPES: &[&str] = &["task", "feature", "milestone", "release", "review"];
 pub const PRIORITIES: &[&str] = &["P0", "P1", "P2", "P3", "P4"];
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 const MAX_TITLE: usize = 300;
 const MAX_BODY: usize = 1_000_000;
 
-pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at, type, priority, agent, effort, reviewer, release, ran";
+pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at, type, priority, agent, effort, reviewer, release, ran, released_at, release_ref";
 /// Number of columns in `COLS` (extra joined columns start at this index).
-pub const NCOLS: usize = 22;
+pub const NCOLS: usize = 24;
 
 pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -56,6 +90,8 @@ pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
         "reviewer": r.get::<_, Option<String>>(19)?,
         "release": r.get::<_, Option<String>>(20)?,
         "ran": r.get::<_, Option<String>>(21)?,
+        "released_at": iso_opt(r.get::<_, Option<i64>>(22)?),
+        "release_ref": r.get::<_, Option<String>>(23)?,
     }))
 }
 
@@ -292,19 +328,6 @@ fn lower_opt(a: &Args, name: &str) -> Option<String> {
     a.opt(name).map(|v| v.trim().to_ascii_lowercase())
 }
 
-fn id_list(c: &Connection, v: Option<&str>) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    if let Some(v) = v {
-        for part in v.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            let id = resolve(c, part)?;
-            if !out.contains(&id) {
-                out.push(id);
-            }
-        }
-    }
-    Ok(out)
-}
-
 // ---------------------------------------------------------------- ordering
 
 pub enum Place<'a> {
@@ -411,6 +434,18 @@ fn reaches(c: &Connection, from: &str, target: &str) -> Result<bool> {
 }
 
 pub fn add_link(c: &Connection, src: &str, kind: &str, dst: &str) -> Result<bool> {
+    add_link_until(c, src, kind, dst, None)
+}
+
+/// Adds a link; for `needs`, `until` is the state the other issue must reach
+/// (default done). Re-linking with another `until` updates it.
+pub fn add_link_until(
+    c: &Connection,
+    src: &str,
+    kind: &str,
+    dst: &str,
+    until: Option<&str>,
+) -> Result<bool> {
     if src == dst {
         return Err(AitError::new(
             "CYCLE",
@@ -423,16 +458,76 @@ pub fn add_link(c: &Connection, src: &str, kind: &str, dst: &str) -> Result<bool
             format!("{src} needs {dst} would create a cycle ({dst} already needs {src})"),
         ));
     }
-    let n = c.execute(
-        "INSERT OR IGNORE INTO links(src, kind, dst) VALUES (?1, ?2, ?3)",
-        params![src, kind, dst],
-    )?;
-    Ok(n > 0)
+    let until = until.filter(|u| *u != "done" && kind == "needs");
+    let before: Option<Option<String>> = c
+        .query_row(
+            "SELECT until_state FROM links WHERE src = ?1 AND kind = ?2 AND dst = ?3",
+            params![src, kind, dst],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match before {
+        Some(b) if b.as_deref() == until => Ok(false),
+        Some(_) => {
+            c.execute(
+                "UPDATE links SET until_state = ?4 WHERE src = ?1 AND kind = ?2 AND dst = ?3",
+                params![src, kind, dst, until],
+            )?;
+            Ok(true)
+        }
+        None => {
+            c.execute(
+                "INSERT INTO links(src, kind, dst, until_state) VALUES (?1, ?2, ?3, ?4)",
+                params![src, kind, dst, until],
+            )?;
+            Ok(true)
+        }
+    }
+}
+
+pub fn check_until(u: &str) -> Result<()> {
+    if UNTIL_STATES.contains(&u) {
+        Ok(())
+    } else {
+        Err(AitError::new(
+            "INVALID_INPUT",
+            format!(
+                "a need can wait for {} (not '{u}')",
+                UNTIL_STATES.join(", ")
+            ),
+        ))
+    }
+}
+
+/// `A,B:in_review` -> [(A, None), (B, Some("in_review"))].
+fn need_list(c: &Connection, v: Option<&str>) -> Result<Vec<(String, Option<String>)>> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    if let Some(v) = v {
+        for part in v.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (r, until) = split_until(part);
+            if let Some(u) = until {
+                check_until(u)?;
+            }
+            let id = resolve(c, r)?;
+            if !out.iter().any(|(x, _)| *x == id) {
+                out.push((id, until.map(str::to_string)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `ID:state` -> (ID, Some(state)) when the suffix is a state name.
+pub fn split_until(part: &str) -> (&str, Option<&str>) {
+    match part.rsplit_once(':') {
+        Some((r, u)) if STATES.contains(&u.trim()) => (r.trim(), Some(u.trim())),
+        _ => (part, None),
+    }
 }
 
 fn link_kind(k: &str) -> Result<&'static str> {
     match k {
-        "needs" => Ok("needs"),
+        "needs" | "blocked-by" | "blocked_by" => Ok("needs"),
         "relates" => Ok("relates"),
         "discovered-from" | "discovered_from" => Ok("discovered_from"),
         _ => Err(AitError::usage(format!(
@@ -443,12 +538,21 @@ fn link_kind(k: &str) -> Result<&'static str> {
 
 fn brief_list(c: &Connection, sql: &str, id: &str) -> Result<Vec<Value>> {
     let mut st = c.prepare(sql)?;
+    let with_until = st.column_count() > 3;
     let rows = st.query_map([id], |r| {
-        Ok(json!({
+        let mut v = json!({
             "id": r.get::<_, String>(0)?,
             "title": r.get::<_, Option<String>>(1)?,
             "state": r.get::<_, Option<String>>(2)?,
-        }))
+        });
+        if with_until && let Some(o) = v.as_object_mut() {
+            let u: Option<String> = r.get(3)?;
+            o.insert(
+                "until".to_string(),
+                json!(u.unwrap_or_else(|| "done".to_string())),
+            );
+        }
+        Ok(v)
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
@@ -481,8 +585,11 @@ pub fn links_json(c: &Connection, id: &str) -> Result<Value> {
             .unwrap_or_else(|| json!({"id": p, "title": null, "state": null})),
         None => Value::Null,
     };
+    let needs_sql = "SELECT l.dst, i.title, i.state, l.until_state FROM links l
+                     LEFT JOIN issues i ON i.id = l.dst
+                     WHERE l.src = ?1 AND l.kind = 'needs' ORDER BY l.dst";
     Ok(json!({
-        "needs": brief_list(c, &out("needs"), id)?,
+        "needs": brief_list(c, needs_sql, id)?,
         "needed_by": brief_list(c, &inc("needs"), id)?,
         "relates": relates,
         "discovered_from": brief_list(c, &out("discovered_from"), id)?,
@@ -608,15 +715,21 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     let title = check_title(a.req_pos(1, "title")?)?;
     let body = read_text(a, "body")?.unwrap_or_default();
     let state = a.opt("state").unwrap_or("ready");
-    if state == "done" {
+    if ["done", "released", "in_review"].contains(&state) {
         return Err(AitError::new(
             "INVALID_STATE",
-            "new issues cannot start as done",
+            format!("new issues cannot start as {state}"),
         ));
     }
     check_state(state, a.opt("reason"))?;
     let reason = a.opt("reason").filter(|r| !r.trim().is_empty());
     let f = read_fields(a, &env.cfg)?;
+    if f.kind.as_deref() == Some("review") && a.opt("parent").is_none() {
+        return Err(AitError::new(
+            "INVALID_INPUT",
+            "a review needs --parent <the issue it reviews>",
+        ));
+    }
     let issue = db::write(c, |c| {
         let after = a.opt("after").map(|x| resolve(c, x)).transpose()?;
         let parent = a.opt("parent").map(|x| resolve(c, x)).transpose()?;
@@ -624,7 +737,7 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         if let Some(r) = &release {
             check_release_target(c, r)?;
         }
-        let needs = id_list(c, a.opt("needs"))?;
+        let needs = need_list(c, a.opt("needs"))?;
         let disc = a
             .opt("discovered-from")
             .map(|x| resolve(c, x))
@@ -664,9 +777,16 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 release,
             ],
         )?;
-        for n in &needs {
-            add_link(c, &id, "needs", n)?;
+        for (n, until) in &needs {
+            add_link_until(c, &id, "needs", n, until.as_deref())?;
         }
+        let needs: Vec<String> = needs
+            .iter()
+            .map(|(n, u)| match u {
+                Some(u) => format!("{n}:{u}"),
+                None => n.clone(),
+            })
+            .collect();
         if let Some(d) = &disc {
             add_link(c, &id, "discovered_from", d)?;
         }
@@ -843,6 +963,12 @@ pub fn cmd_state(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "use `ait done <id> --summary \"...\"` to close an issue",
         ));
     }
+    if state == "released" {
+        return Err(AitError::new(
+            "INVALID_STATE",
+            "use `ait ship <id>` to mark finished work as released",
+        ));
+    }
     check_state(state, a.opt("reason"))?;
     let reason = a.opt("reason").filter(|r| !r.trim().is_empty());
     let force = a.flag("force");
@@ -851,15 +977,18 @@ pub fn cmd_state(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         let id = resolve(c, input)?;
         claims::guard_write(c, env, &id, force, want)?;
         let from = state_of(c, &id)?;
-        if from == "done" && !force {
+        if FINISHED.contains(&from.as_str()) && !force {
             return Err(AitError::new(
                 "ALREADY_DONE",
-                format!("{id} is done; reopening it needs --force"),
+                format!("{id} is {from}; reopening it needs --force"),
             ));
         }
+        if state == "in_review" {
+            claims::submit_for_review(c, env, &id, force)?;
+        }
         c.execute(
-            "UPDATE issues SET state = ?2, reason = ?3, done_at = CASE WHEN ?2 = 'done' THEN done_at ELSE NULL END,
-                 version = version + 1, updated_at = ?4 WHERE id = ?1",
+            "UPDATE issues SET state = ?2, reason = ?3, done_at = NULL, released_at = NULL,
+                 release_ref = NULL, version = version + 1, updated_at = ?4 WHERE id = ?1",
             params![id, state, reason, env.now],
         )?;
         db::event(
@@ -985,7 +1114,11 @@ pub fn cmd_move(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
 }
 
 pub fn cmd_link(c: &Connection, env: &Env, a: &Args, remove: bool) -> Result<Output> {
-    a.expect(&[], 3)?;
+    a.expect(&["until"], 3)?;
+    let until = a.opt("until").map(str::trim);
+    if let Some(u) = until {
+        check_until(u)?;
+    }
     let src_in = a.req_pos(0, "issue id")?;
     let kind = link_kind(a.req_pos(1, "link kind (needs, relates, discovered-from)")?)?;
     let dst_in = a.req_pos(2, "other issue id")?;
@@ -1005,7 +1138,10 @@ pub fn cmd_link(c: &Connection, env: &Env, a: &Args, remove: bool) -> Result<Out
             }
             n > 0
         } else {
-            add_link(c, &src, kind, &dst)?
+            if until.is_some() && kind != "needs" {
+                return Err(AitError::usage("--until only applies to needs links"));
+            }
+            add_link_until(c, &src, kind, &dst, until)?
         };
         if changed {
             let action = if remove { "unlink" } else { "link" };
@@ -1014,7 +1150,7 @@ pub fn cmd_link(c: &Connection, env: &Env, a: &Args, remove: bool) -> Result<Out
                 env,
                 Some(&src),
                 action,
-                json!({"kind": kind, "other": dst}),
+                json!({"kind": kind, "other": dst, "until": until}),
             )?;
         }
         Ok((src, dst, changed))

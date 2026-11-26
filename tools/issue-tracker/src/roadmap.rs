@@ -5,9 +5,11 @@
 
 use crate::approvals::Approvals;
 use crate::args::Args;
+use crate::check;
 use crate::claims;
 use crate::db::{self, Env};
-use crate::error::Result;
+use crate::error::{AitError, Result};
+use crate::issues;
 use crate::output::{Output, line, s};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -34,13 +36,21 @@ pub fn rollup_with(c: &Connection, env: &Env, offered: &[String], id: &str) -> R
         })?
         .collect::<rusqlite::Result<_>>()?;
     let (mut total, mut done, mut dropped, mut in_progress) = (0, 0, 0, 0);
+    let (mut in_review, mut released) = (0, 0);
     let mut decisions = Vec::new();
     let mut blocked = Vec::new();
     for (mid, state, session, lease) in &rows {
         match state.as_str() {
             "dropped" => dropped += 1,
-            "done" => {
+            "done" | "released" => {
                 done += 1;
+                total += 1;
+                if state == "released" {
+                    released += 1;
+                }
+            }
+            "in_review" => {
+                in_review += 1;
                 total += 1;
             }
             _ => total += 1,
@@ -66,6 +76,8 @@ pub fn rollup_with(c: &Connection, env: &Env, offered: &[String], id: &str) -> R
         "open": total - done,
         "dropped": dropped,
         "in_progress": in_progress,
+        "in_review": in_review,
+        "released": released,
         "percent": percent,
         "next": next,
         "decisions": decisions,
@@ -83,6 +95,12 @@ pub fn rollup_line(r: &Value) -> String {
     let mut out = format!("{}/{} done ({}%)", r["done"], r["total"], r["percent"]);
     if r["in_progress"].as_i64().unwrap_or(0) > 0 {
         let _ = write!(out, ", {} in progress", r["in_progress"]);
+    }
+    if r["in_review"].as_i64().unwrap_or(0) > 0 {
+        let _ = write!(out, ", {} in review", r["in_review"]);
+    }
+    if r["released"].as_i64().unwrap_or(0) > 0 {
+        let _ = write!(out, ", {} released", r["released"]);
     }
     if let Some(n) = r["next"].as_str() {
         let _ = write!(out, ", next {n}");
@@ -184,4 +202,176 @@ pub fn cmd_roadmap(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         text.push_str("no releases, milestones or features yet (ait add ... --type release|milestone|feature)");
     }
     Ok(Output::new(v, text))
+}
+
+/// Every member of a container (children through `parent`, and everything
+/// whose `release` is it), recursively, with its state.
+pub fn members(c: &Connection, id: &str) -> Result<Vec<(String, String)>> {
+    let mut st = c.prepare(
+        "WITH RECURSIVE m(id) AS (
+             SELECT id FROM issues WHERE (parent = ?1 OR release = ?1) AND id <> ?1
+             UNION
+             SELECT i.id FROM issues i JOIN m ON (i.parent = m.id OR i.release = m.id)
+             WHERE i.id <> ?1
+         )
+         SELECT i.id, i.state FROM issues i JOIN m ON m.id = i.id ORDER BY i.ord, i.id",
+    )?;
+    let rows = st
+        .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// Runs git in `repo`; true when it exits 0.
+fn git_ok(repo: &std::path::Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// `ait ship <ID> [--ref R] [--force]`: marks a finished release, milestone,
+/// feature (or a single issue) and all its done members as released.
+///
+/// Gates (all skipped by --force): every member is done, released or
+/// dropped; with a repository, each done member has a first-parent merge on
+/// main carrying its trailer (or is in git_baseline), and when
+/// `origin/<main>` exists, that merge has been pushed to it.
+pub fn cmd_ship(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
+    a.expect(&["ref", "force"], 1)?;
+    let input = a.req_pos(0, "issue id")?;
+    let force = a.flag("force");
+    let reference = a
+        .opt("ref")
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(str::to_string);
+    let repo = env.cfg.repo_dir(&env.db_path);
+    // Read git outside the write transaction.
+    let (target, to_check) = db::read(c, |c| {
+        let id = issues::resolve(c, input)?;
+        let mut list = members(c, &id)?;
+        list.insert(0, (id.clone(), issues::state_of(c, &id)?));
+        Ok((id, list))
+    })?;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    let has_members = to_check.len() > 1;
+    for (mid, st) in &to_check {
+        let is_target = *mid == target;
+        if st == "dropped" || st == "released" {
+            continue;
+        }
+        // A container's own state does not matter; its members do.
+        if is_target && has_members {
+            continue;
+        }
+        if st != "done" {
+            problems.push(format!("{mid} is {st}, not done"));
+        }
+    }
+    // Only tasks carry merges; containers and reviews do not.
+    let tasks: std::collections::HashSet<String> = db::read(c, |c| {
+        let mut st = c.prepare("SELECT id FROM issues WHERE type = 'task'")?;
+        let ids = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    })?;
+    let done: Vec<&String> = to_check
+        .iter()
+        .filter(|(i, st)| st == "done" && tasks.contains(i))
+        .map(|(i, _)| i)
+        .collect();
+    if !force && problems.is_empty() && !done.is_empty() {
+        match &repo {
+            None => warnings.push(
+                "no repository configured (repo =): merges and pushes were not checked".to_string(),
+            ),
+            Some(repo) => {
+                let merged = check::git_merged(repo, &env.cfg.main_branch, &env.cfg.trailer)
+                    .map_err(|e| AitError::new("GIT", e))?;
+                let mut base_problems = Vec::new();
+                let baseline = check::load_baseline(env, repo, &mut base_problems)?;
+                let remote = format!("refs/remotes/origin/{}", env.cfg.main_branch);
+                let has_remote = git_ok(repo, &["rev-parse", "--verify", "--quiet", &remote]);
+                if !has_remote {
+                    warnings.push(format!(
+                        "origin/{} not found: pushes were not checked",
+                        env.cfg.main_branch
+                    ));
+                }
+                for id in &done {
+                    match merged.get(id.as_str()) {
+                        Some(sha) => {
+                            if has_remote
+                                && !git_ok(repo, &["merge-base", "--is-ancestor", sha, &remote])
+                            {
+                                problems.push(format!(
+                                    "{id} is merged in {} but not pushed to origin/{}",
+                                    &sha[..sha.len().min(12)],
+                                    env.cfg.main_branch
+                                ));
+                            }
+                        }
+                        None if baseline.contains(id.as_str()) => {}
+                        None => problems.push(format!(
+                            "{id} has no merge on {} with `{}: {id}`",
+                            env.cfg.main_branch, env.cfg.trailer
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    if !problems.is_empty() && !force {
+        let mut msg = format!("{target} cannot be released yet:");
+        for p in &problems {
+            let _ = write!(msg, "\n  {p}");
+        }
+        return Err(AitError::new("NOT_SHIPPABLE", msg).with_details(json!({"problems": problems})));
+    }
+    let shipped = db::write(c, |c| {
+        let mut ids = Vec::new();
+        for (mid, _) in &to_check {
+            // Re-read inside the transaction: only finished work is released.
+            let st = issues::state_of(c, mid)?;
+            let is_container = *mid == target && has_members;
+            if st == "done"
+                || (is_container && st != "dropped" && st != "released")
+                || (force && *mid == target && st != "released")
+            {
+                c.execute(
+                    "UPDATE issues SET state = 'released', reason = NULL, released_at = ?2,
+                         release_ref = ?3, done_at = COALESCE(done_at, ?2),
+                         version = version + 1, updated_at = ?2 WHERE id = ?1",
+                    params![mid, env.now, reference],
+                )?;
+                c.execute(
+                    "UPDATE claims SET session = NULL, lease_until = NULL WHERE issue = ?1",
+                    [mid],
+                )?;
+                ids.push(mid.clone());
+            }
+        }
+        db::event(
+            c,
+            env,
+            Some(&target),
+            "ship",
+            json!({"released": ids, "ref": reference, "forced": force, "warnings": warnings}),
+        )?;
+        Ok(ids)
+    })?;
+    let mut text = format!("released {} issue(s): {}", shipped.len(), shipped.join(" "));
+    for w in &warnings {
+        let _ = write!(text, "\nnote: {w}");
+    }
+    Ok(Output::new(
+        json!({"released": shipped, "ref": reference, "warnings": warnings}),
+        text,
+    ))
 }

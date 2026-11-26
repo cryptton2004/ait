@@ -89,6 +89,12 @@ pub const MIGRATIONS: &[&str] = &[
     CREATE INDEX issues_release ON issues(release);
     CREATE INDEX issues_prio ON issues(priority, ord);
     ",
+    // 3: review and release workflow; dependency links with a target state
+    "
+    ALTER TABLE links ADD COLUMN until_state TEXT;
+    ALTER TABLE issues ADD COLUMN released_at INTEGER;
+    ALTER TABLE issues ADD COLUMN release_ref TEXT;
+    ",
 ];
 
 pub fn schema_version() -> i64 {

@@ -47,7 +47,8 @@ impl AitError {
             "NOT_FOUND" => 3,
             "ALREADY_CLAIMED" | "CLAIM_STALE" | "STALE_GENERATION" | "NOT_CLAIMANT"
             | "NOT_CLAIMED" | "VERSION_CONFLICT" | "CYCLE" | "IN_USE" | "NOT_EMPTY"
-            | "ID_TAKEN" | "GROUP_FULL" | "ALREADY_DONE" => 4,
+            | "ID_TAKEN" | "GROUP_FULL" | "ALREADY_DONE" | "NOT_SHIPPABLE" | "REVIEWS_OPEN"
+            | "REVIEW_NOT_STARTED" => 4,
             "BUSY" => 5,
             "NO_WORK" => 6,
             "CHECK_FAILED" => 7,
