@@ -25,6 +25,7 @@ mod notes;
 mod output;
 mod roadmap;
 mod serve;
+mod stats;
 mod time;
 
 use args::Args;
@@ -150,6 +151,7 @@ pub fn dispatch(cmd: &str, c: &rusqlite::Connection, env: &db::Env, a: &Args) ->
         "list" | "ls" => issues::cmd_list(c, env, a),
         "next" => claims::cmd_next(c, env, a),
         "roadmap" => roadmap::cmd_roadmap(c, env, a),
+        "stats" => stats::cmd_stats(c, env, a),
         "ship" => roadmap::cmd_ship(c, env, a),
         "claim" => claims::cmd_claim(c, env, a),
         "release" => claims::cmd_release(c, env, a),

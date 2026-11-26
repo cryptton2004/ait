@@ -609,3 +609,36 @@ fn epics_roll_up_to_in_review_and_done() {
             .contains("automatic")
     );
 }
+
+#[test]
+fn stats_measure_time_in_each_column() {
+    let t = T::new("stats");
+    t.ok_at(None, T0, &["add", "CORE", "timed"]);
+    t.ok_at(None, T0, &["add", "CORE", "still ready"]);
+    t.ok_at(Some("a1"), T0 + 60 * MIN, &["claim", "CORE-1-00"]);
+    t.ok_at(
+        Some("a1"),
+        T0 + 180 * MIN,
+        &["state", "CORE-1-00", "in_review", "--gen", "1"],
+    );
+    t.ok_at(
+        None,
+        T0 + 240 * MIN,
+        &["done", "CORE-1-00", "--summary", "ok", "--force"],
+    );
+    let v = t.ok_at(None, T0 + 300 * MIN, &["stats"]);
+    let col = |c: &str, k: &str| v["columns"][c][k].clone();
+    assert_eq!(col("ready", "count"), 1);
+    assert_eq!(col("ready", "median_hours"), 1.0);
+    assert_eq!(col("in_progress", "median_hours"), 2.0);
+    assert_eq!(col("in_review", "median_hours"), 1.0);
+    assert_eq!(col("ready", "now"), 1);
+    assert_eq!(col("ready", "now_max_hours"), 5.0);
+    assert_eq!(col("done", "now"), 1);
+    assert_eq!(v["cycle_time"]["median_hours"], 3.0);
+    assert_eq!(v["lead_time"]["median_hours"], 4.0);
+    // --since keeps only time that ended inside the window.
+    let v = t.ok_at(None, T0 + 300 * MIN, &["stats", "--since", "90m"]);
+    assert_eq!(v["columns"]["ready"]["count"], 0);
+    assert_eq!(v["columns"]["in_review"]["count"], 1);
+}

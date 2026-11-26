@@ -86,6 +86,11 @@ textarea { min-height: 140px; font: 12px ui-monospace, Consolas, monospace; resi
 .crit li { display: flex; gap: 6px; align-items: flex-start; padding: 2px 0; overflow-wrap: anywhere; }
 .crit input { width: auto; margin-top: 3px; }
 .crit .done { color: var(--muted); text-decoration: line-through; }
+#stats table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#stats th, #stats td { text-align: right; padding: 2px 4px; border-bottom: 1px solid var(--line); }
+#stats th:first-child, #stats td:first-child { text-align: left; }
+#stats th { color: var(--muted); font-weight: 500; }
+#stats .slow { color: var(--bad); font-weight: 600; }
 .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; width: min(560px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(0, 0, 0, .35); }
@@ -109,6 +114,7 @@ dialog h2 { font-size: 15px; margin: 0 0 10px; }
   <aside>
     <div class="panel" id="detail" hidden></div>
     <div class="panel" id="nextlist"><h2>Next up</h2><div id="nextbody" class="w">loading…</div></div>
+    <div class="panel" id="statsPanel"><h2>Flow: time in each column <select id="statsWindow" aria-label="time window" style="width:auto;font-size:12px"><option value="7d">7 days</option><option value="30d" selected>30 days</option><option value="">all time</option></select></h2><div id="stats" class="w">loading…</div></div>
     <div class="panel" id="roadmapPanel" hidden><h2>Roadmap</h2><div id="roadmap"></div></div>
     <div class="panel"><h2>Activity</h2><ul id="feed"></ul></div>
   </aside>
@@ -352,6 +358,35 @@ function renderNext(v) {
   };
   list(v.build || [], "ait next (build)");
   list(v.frame || [], "ait next --frame");
+}
+function hours(h) {
+  if (h === null || h === undefined) return "–";
+  return h >= 48 ? (h / 24).toFixed(1) + "d" : h.toFixed(1) + "h";
+}
+function renderStats(v) {
+  const box = document.getElementById("stats");
+  box.replaceChildren();
+  box.className = "";
+  const t = el("table");
+  const hr = el("tr");
+  for (const h of ["column", "passed", "median", "p90", "now", "oldest"]) hr.append(el("th", null, h));
+  t.append(hr);
+  for (const [key, label] of COLS) {
+    const x = v.columns[key] || {};
+    const tr = el("tr");
+    const oldest = el("td", null, hours(x.now_max_hours));
+    // Flag an item that has waited longer than 90% of past stays.
+    if (x.p90_hours !== null && x.now_max_hours !== null && x.now_max_hours > x.p90_hours && !FINISHED.includes(key)) oldest.className = "slow";
+    tr.append(el("td", null, label), el("td", null, x.count || 0), el("td", null, hours(x.median_hours)), el("td", null, hours(x.p90_hours)), el("td", null, x.now || 0), oldest);
+    t.append(tr);
+  }
+  box.append(t);
+  const line = (k, label) => {
+    const x = v[k];
+    box.append(el("div", "w", label + ": " + x.count + " issues, median " + hours(x.median_hours) + ", p90 " + hours(x.p90_hours)));
+  };
+  line("cycle_time", "Cycle time (first claim → done)");
+  line("lead_time", "Lead time (added → done)");
 }
 function rollupText(r) {
   let t = r.done + "/" + r.total + " done (" + r.percent + "%)";
@@ -627,7 +662,9 @@ function editForm(box, i) {
 
 // ---------------------------------------------------------------- refresh
 async function refresh() {
-  const [iv, bv, av, rv, nv] = await Promise.all([get("/api/issues"), get("/api/board"), get("/api/activity?limit=40"), get("/api/roadmap"), get("/api/next")]);
+  const win = document.getElementById("statsWindow").value;
+  const [iv, av, rv, nv, sv] = await Promise.all([get("/api/issues"), get("/api/activity?limit=40"), get("/api/roadmap"), get("/api/next"), get("/api/stats" + (win ? "?since=" + win : ""))]);
+  renderStats(sv);
   issues = iv.issues;
   wip = iv.wip || {};
   renderNext(nv);
@@ -658,6 +695,7 @@ async function poll() {
   }
   setTimeout(poll, 1500);
 }
+document.getElementById("statsWindow").addEventListener("change", () => refresh());
 if (WRITABLE) {
   const nb = document.getElementById("newbtn");
   nb.hidden = false;

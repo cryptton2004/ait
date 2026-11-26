@@ -292,6 +292,16 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
         "/api/issues" => db::read(c, |c| issues_view(c, &env)),
         "/api/roadmap" => db::read(c, |c| crate::roadmap::roadmap_json(c, &env, false)),
         "/api/next" => next_view(c, &env),
+        "/api/stats" => {
+            let since = query(q, "since")
+                .map(crate::time::parse_duration)
+                .transpose()
+                .map(|d| d.map(|d| env.now - d));
+            match since {
+                Ok(since) => db::read(c, |c| crate::stats::stats_json(c, &env, since)),
+                Err(e) => Err(e),
+            }
+        }
         "/api/activity" => {
             let after = query(q, "after").and_then(|v| v.parse().ok());
             let limit = query(q, "limit")
