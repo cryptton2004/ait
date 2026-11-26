@@ -1,0 +1,2 @@
+# Vendored crates are checksummed byte for byte: never convert line endings.
+vendor/** -text
