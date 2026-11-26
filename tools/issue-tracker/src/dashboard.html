@@ -25,8 +25,14 @@ header h1 { font-size: 17px; margin: 0; }
 #nextup { font-size: 13px; overflow-wrap: anywhere; }
 #nextup b { color: var(--accent); cursor: pointer; }
 #live { margin-left: auto; color: var(--muted); font-size: 12px; }
-main { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px; }
-@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+#panels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 16px 16px 0; align-items: start; }
+@media (max-width: 1200px) { #panels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { #panels { grid-template-columns: 1fr; } }
+#panels .panel { max-height: 360px; display: flex; flex-direction: column; }
+#panels .panel > :not(h2) { min-height: 0; overflow-y: auto; }
+main { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 16px; }
+main.withdetail { grid-template-columns: 1fr 380px; }
+@media (max-width: 900px) { main.withdetail { grid-template-columns: 1fr; } }
 #columns { display: grid; grid-template-columns: repeat(7, minmax(165px, 1fr)); gap: 10px; align-items: start; overflow-x: auto; padding-bottom: 4px; min-width: 0; }
 .col { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
 .col.over { outline: 2px dashed var(--accent); }
@@ -60,14 +66,13 @@ aside { display: grid; gap: 16px; align-content: start; min-width: 0; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
 .panel h2 { font-size: 13px; margin: 0 0 8px; }
 .panel h3 { font-size: 12px; margin: 12px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-#feed { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 50vh; overflow-y: auto; font-size: 12px; }
+#feed { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 12px; align-content: start; }
 #feed li { border-bottom: 1px solid var(--line); padding-bottom: 6px; overflow-wrap: anywhere; }
 .w { color: var(--muted); }
 #detail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; max-height: 40vh; overflow-y: auto; }
 .chip { display: inline-block; background: var(--chip); border-radius: 10px; padding: 1px 8px; font-size: 12px; margin: 2px 4px 2px 0; }
 #nextlist ol { margin: 0; padding-left: 22px; font-size: 13px; }
 #nextlist li { cursor: pointer; overflow-wrap: anywhere; margin-bottom: 3px; }
-#roadmap { max-height: 40vh; overflow-y: auto; }
 #roadmap .item { padding: 6px 0; border-bottom: 1px solid var(--line); cursor: pointer; overflow-wrap: anywhere; }
 #roadmap .item:last-child { border-bottom: 0; }
 #roadmap .k { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); }
@@ -84,7 +89,9 @@ input, select, textarea { font: inherit; color: var(--text); background: var(--b
 textarea { min-height: 140px; font: 12px ui-monospace, Consolas, monospace; resize: vertical; }
 .crit { list-style: none; margin: 4px 0 8px; padding: 0; font-size: 13px; }
 .crit li { display: flex; gap: 6px; align-items: flex-start; padding: 2px 0; overflow-wrap: anywhere; }
-.crit input { width: auto; margin-top: 3px; }
+.crit input { width: auto; margin-top: 3px; flex: none; }
+.crit span { flex: 1; min-width: 0; }
+.crit .rm { flex: none; padding: 0 6px; font-size: 12px; line-height: 18px; }
 .crit .done { color: var(--muted); text-decoration: line-through; }
 #stats table { width: 100%; border-collapse: collapse; font-size: 12px; }
 #stats th, #stats td { text-align: right; padding: 2px 4px; border-bottom: 1px solid var(--line); }
@@ -112,14 +119,16 @@ input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 
   <button id="newbtn" class="primary" hidden>+ New issue</button>
   <span id="live"></span>
 </header>
-<main>
+<section id="panels" aria-label="Overview">
+  <div class="panel" id="nextlist"><h2>Next up</h2><div id="nextbody" class="w">loading…</div></div>
+  <div class="panel" id="statsPanel"><h2>Flow: time in each column <select id="statsWindow" aria-label="time window" style="width:auto;font-size:12px"><option value="7d">7 days</option><option value="30d" selected>30 days</option><option value="">all time</option></select></h2><div id="stats" class="w">loading…</div></div>
+  <div class="panel" id="roadmapPanel"><h2>Roadmap</h2><div id="roadmap"></div></div>
+  <div class="panel"><h2>Activity <span class="w" id="feedcount"></span></h2><ul id="feed"></ul></div>
+</section>
+<main id="main">
   <section id="columns" aria-label="Board columns"></section>
   <aside>
     <div class="panel" id="detail" hidden></div>
-    <div class="panel" id="nextlist"><h2>Next up</h2><div id="nextbody" class="w">loading…</div></div>
-    <div class="panel" id="statsPanel"><h2>Flow: time in each column <select id="statsWindow" aria-label="time window" style="width:auto;font-size:12px"><option value="7d">7 days</option><option value="30d" selected>30 days</option><option value="">all time</option></select></h2><div id="stats" class="w">loading…</div></div>
-    <div class="panel" id="roadmapPanel" hidden><h2>Roadmap</h2><div id="roadmap"></div></div>
-    <div class="panel"><h2>Activity</h2><ul id="feed"></ul></div>
   </aside>
 </main>
 
@@ -261,7 +270,7 @@ function card(i) {
   else if (i.column === "in_review") meta = "in review" + (i.reason ? ": " + i.reason : "");
   if (i.agent && !FINISHED.includes(i.column)) meta = (meta ? meta + " · " : "") + "agent " + i.agent;
   if (meta) c.append(el("div", "m", meta));
-  const open = () => showDetail(i.id);
+  const open = () => (selected === i.id && !document.getElementById("detail").hidden) ? closeDetail() : showDetail(i.id);
   c.addEventListener("click", open);
   c.addEventListener("keydown", e => { if (e.key === "Enter") open(); });
   if (WRITABLE && i.column !== "released") {
@@ -336,7 +345,14 @@ function renderColumns() {
     root.append(col);
   }
 }
+function closeDetail() {
+  document.getElementById("detail").hidden = true;
+  document.getElementById("main").classList.remove("withdetail");
+  selected = null;
+  renderColumns();
+}
 function renderFeed(events) {
+  document.getElementById("feedcount").textContent = "(latest " + events.length + ")";
   const ul = document.getElementById("feed");
   ul.replaceChildren();
   for (const e of events.slice().reverse()) {
@@ -419,7 +435,7 @@ function renderRoadmap(v) {
   const root = document.getElementById("roadmap");
   root.replaceChildren();
   const all = [].concat(v.releases || [], v.milestones || [], v.features || []);
-  document.getElementById("roadmapPanel").hidden = !all.length;
+  if (!all.length) root.append(el("div", "w", "no releases, milestones or features yet"));
   for (const x of all) {
     const d = el("div", "item");
     d.append(el("div", "k", x.type + " · " + x.id + " · " + x.state), el("div", null, x.title));
@@ -654,6 +670,7 @@ function newDialog() {
 // ---------------------------------------------------------------- detail
 async function showDetail(id) {
   selected = id;
+  document.getElementById("main").classList.add("withdetail");
   const box = document.getElementById("detail");
   try {
     const v = await get("/api/issue/" + encodeURIComponent(id));
@@ -699,6 +716,13 @@ async function showDetail(id) {
         cb.title = x.done ? "checked by " + (x.done_by || "-") + " " + ago(x.done_at) : "not checked yet";
         cb.addEventListener("change", () => act(["criteria", i.id, x.done ? "--uncheck" : "--check", String(x.n)], "criterion " + x.n + (x.done ? " unchecked" : " checked"), () => showDetail(i.id)));
         li.append(cb, el("span", x.done ? "done" : null, x.text));
+        if (WRITABLE && !FINISHED.includes(i.state)) {
+          const rm = el("button", "rm", "×");
+          rm.title = "remove this criterion (ait criteria " + i.id + " --remove " + x.n + ")";
+          rm.setAttribute("aria-label", "remove criterion " + x.n);
+          rm.addEventListener("click", () => act(["criteria", i.id, "--remove", String(x.n)], "criterion " + x.n + " removed", () => showDetail(i.id)));
+          li.append(rm);
+        }
         ul.append(li);
       }
       if (!crit.length) ul.append(el("li", "w", "none"));
@@ -726,7 +750,7 @@ async function showDetail(id) {
       box.append(el("h3", null, "Note"), ta, b);
     }
     const close = el("button", null, "close");
-    close.addEventListener("click", () => { box.hidden = true; selected = null; renderColumns(); });
+    close.addEventListener("click", closeDetail);
     box.append(el("div", "row"), close);
     box.hidden = false;
     renderColumns();
