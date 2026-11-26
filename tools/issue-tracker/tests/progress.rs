@@ -165,6 +165,14 @@ fn serve_answers_dashboard_and_api_on_localhost_only() {
     assert_eq!(get(port, "/api/issue/NOPE-1-00").0, 404);
     assert_eq!(get(port, "/api/board").0, 200);
     assert_eq!(get(port, "/api/activity?after=1&limit=5").0, 200);
+    let (code, rm) = get(port, "/api/roadmap");
+    assert_eq!(code, 200);
+    let rm: serde_json::Value = serde_json::from_str(&rm).unwrap();
+    assert!(
+        rm["releases"].is_array() && rm["features"].is_array(),
+        "{rm}"
+    );
+    assert_eq!(issues["issues"][0]["priority"], "P2");
     assert_eq!(get(port, "/nothing").0, 404);
     // Writes are not possible and foreign Host headers are refused.
     let (code, _) = http(

@@ -46,6 +46,16 @@ aside { display: grid; gap: 16px; align-content: start; min-width: 0; }
 #feed .w { color: var(--muted); }
 #detail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; max-height: 40vh; overflow-y: auto; }
 #detail .chip { display: inline-block; background: var(--chip); border-radius: 10px; padding: 1px 8px; font-size: 12px; margin: 2px 4px 2px 0; }
+.card .id .p { margin-left: 6px; color: var(--accent); }
+.card .id .p.P0, .card .id .p.P1 { color: var(--bad); font-weight: 600; }
+.card .ty { margin-left: 6px; font-size: 11px; text-transform: uppercase; color: var(--warn); }
+#roadmap { max-height: 50vh; overflow-y: auto; }
+#roadmap .item { padding: 6px 0; border-bottom: 1px solid var(--line); cursor: pointer; overflow-wrap: anywhere; }
+#roadmap .item:last-child { border-bottom: 0; }
+#roadmap .k { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); }
+#roadmap .bar { height: 6px; background: var(--chip); border-radius: 3px; margin-top: 4px; overflow: hidden; }
+#roadmap .bar span { display: block; height: 100%; background: var(--ok); }
+#roadmap .m { font-size: 12px; color: var(--muted); margin-top: 2px; }
 button { font: inherit; background: var(--chip); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
 </style>
 </head>
@@ -59,6 +69,7 @@ button { font: inherit; background: var(--chip); color: var(--text); border: 1px
   <section id="columns" aria-label="Board columns"></section>
   <aside>
     <div class="panel" id="detail" hidden></div>
+    <div class="panel" id="roadmapPanel" hidden><h2>Roadmap</h2><div id="roadmap"></div></div>
     <div class="panel"><h2>Activity</h2><ul id="feed"></ul></div>
   </aside>
 </main>
@@ -91,12 +102,16 @@ function ago(iso) {
 function card(i) {
   const c = el("div", "card");
   c.tabIndex = 0;
-  c.append(el("div", "id", i.id), el("div", "t", i.title));
+  const idl = el("div", "id", i.id);
+  if (i.priority && i.priority !== "P2") idl.append(el("span", "p " + i.priority, i.priority));
+  if (i.type && i.type !== "task") idl.append(el("span", "ty", i.type));
+  c.append(idl, el("div", "t", i.title));
   let meta = "";
   if (i.column === "in_progress" || i.column === "stale") meta = i.session + " · lease " + ago(i.lease_until);
   else if (i.column === "waiting") meta = i.state + (i.reason ? ": " + i.reason : "");
   else if (i.column === "done") meta = "done " + ago(i.done_at);
   else if (i.column === "backlog") meta = i.state;
+  if (i.agent && i.column !== "done") meta = (meta ? meta + " · " : "") + "agent " + i.agent;
   if (meta) c.append(el("div", "m", meta));
   const open = () => showDetail(i.id);
   c.addEventListener("click", open);
@@ -118,6 +133,30 @@ function renderColumns(issues) {
     for (const i of items) cards.append(card(i));
     col.append(h, cards);
     root.append(col);
+  }
+}
+function rollupText(r) {
+  let t = r.done + "/" + r.total + " done (" + r.percent + "%)";
+  if (r.in_progress) t += ", " + r.in_progress + " in progress";
+  if (r.next) t += ", next " + r.next;
+  if ((r.decisions || []).length) t += ", decisions: " + r.decisions.join(" ");
+  if ((r.blocked || []).length) t += ", blocked: " + r.blocked.join(" ");
+  return t;
+}
+function renderRoadmap(v) {
+  const root = document.getElementById("roadmap");
+  root.replaceChildren();
+  const all = [].concat(v.releases || [], v.milestones || [], v.features || []);
+  document.getElementById("roadmapPanel").hidden = !all.length;
+  for (const x of all) {
+    const d = el("div", "item");
+    d.append(el("div", "k", x.type + " · " + x.id + " · " + x.state), el("div", null, x.title));
+    const bar = el("div", "bar"), fill = el("span");
+    fill.style.width = Math.max(0, Math.min(100, x.rollup.percent)) + "%";
+    bar.append(fill);
+    d.append(bar, el("div", "m", rollupText(x.rollup)));
+    d.addEventListener("click", () => showDetail(x.id));
+    root.append(d);
   }
 }
 function renderFeed(events) {
@@ -145,6 +184,13 @@ async function showDetail(id) {
     box.append(h, el("span", "chip", i.state + (i.reason ? ": " + i.reason : "")));
     if (v.claim && v.claim.session) box.append(el("span", "chip", "claimed by " + v.claim.session + " (gen " + v.claim.generation + ", " + v.claim.status + ")"));
     box.append(el("span", "chip", v.ready ? "ready" : "not offered"));
+    box.append(el("span", "chip", i.type + " · " + i.priority));
+    if (i.agent) box.append(el("span", "chip", "agent " + i.agent + (i.agent_model ? " (" + i.agent_model + ")" : "") + (i.effort ? ", effort " + i.effort : "")));
+    if (i.reviewer) box.append(el("span", "chip", "reviewer " + i.reviewer));
+    if (i.parent) box.append(el("span", "chip", "parent " + i.parent));
+    if (i.release) box.append(el("span", "chip", "release " + i.release));
+    if (v.rollup) box.append(el("p", null, "Progress: " + rollupText(v.rollup)));
+    if (i.ran) box.append(el("p", null, "Ran: " + i.ran));
     if (i.summary) box.append(el("p", null, "Done: " + i.summary));
     else for (const b of v.blockers || []) box.append(el("p", null, "• " + b.message));
     if (i.body) box.append(el("pre", null, i.body));
@@ -163,8 +209,9 @@ async function showDetail(id) {
   }
 }
 async function refresh() {
-  const [iv, bv, av] = await Promise.all([get("/api/issues"), get("/api/board"), get("/api/activity?limit=40")]);
+  const [iv, bv, av, rv] = await Promise.all([get("/api/issues"), get("/api/board"), get("/api/activity?limit=40"), get("/api/roadmap")]);
   renderColumns(iv.issues);
+  renderRoadmap(rv);
   renderFeed(av.events);
   const n = bv.counts;
   document.getElementById("summary").textContent =

@@ -152,6 +152,7 @@ fn handle(mut s: TcpStream, base: &Env, port: u16) -> std::io::Result<()> {
         "/api/head" => board::head(c).map(|h| json!({"head": h})),
         "/api/board" => db::read(c, |c| board::board_json(c, &env, 50)),
         "/api/issues" => db::read(c, |c| issues_view(c, &env)),
+        "/api/roadmap" => db::read(c, |c| crate::roadmap::roadmap_json(c, &env, false)),
         "/api/activity" => {
             let after = query(q, "after").and_then(|v| v.parse().ok());
             let limit = query(q, "limit")
@@ -182,10 +183,11 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
     let offered: std::collections::HashSet<String> =
         claims::ready_ids(c, env, &ap, false)?.into_iter().collect();
     let mut st = c.prepare(
-        "SELECT i.id, i.title, i.state, i.reason, i.ord, i.done_at, c.session, c.generation, c.lease_until
+        "SELECT i.id, i.title, i.state, i.reason, i.ord, i.done_at, c.session, c.generation, c.lease_until,
+                i.type, i.priority, i.agent
          FROM issues i LEFT JOIN claims c ON c.issue = i.id
          WHERE i.state <> 'dropped'
-         ORDER BY i.ord, i.id",
+         ORDER BY i.priority, i.ord, i.id",
     )?;
     let rows = st
         .query_map([], |r| {
@@ -218,6 +220,9 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
                 "generation": r.get::<_, Option<i64>>(7)?,
                 "lease_until": crate::time::iso_opt(lease),
                 "column": column,
+                "type": r.get::<_, String>(9)?,
+                "priority": r.get::<_, String>(10)?,
+                "agent": r.get::<_, Option<String>>(11)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
