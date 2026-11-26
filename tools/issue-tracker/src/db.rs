@@ -112,6 +112,11 @@ pub const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE claims ADD COLUMN lease_ms INTEGER;
     ",
+    // 6: labels on issues (comma separated) and evidence on criteria
+    "
+    ALTER TABLE issues ADD COLUMN labels TEXT NOT NULL DEFAULT '';
+    ALTER TABLE criteria ADD COLUMN evidence TEXT;
+    ",
 ];
 
 pub fn schema_version() -> i64 {

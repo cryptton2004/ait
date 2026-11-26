@@ -124,9 +124,35 @@ fn export_import_round_trip_is_byte_for_byte() {
     );
     t.ok(None, &["add", "CORE", "deleted"]);
     t.ok(None, &["delete", "CORE-1-02"]);
+    // Labels, criteria evidence and a claim's own lease survive too.
+    t.ok(
+        None,
+        &[
+            "add",
+            "PAP",
+            "labelled",
+            "--labels",
+            "ui,db",
+            "--criteria",
+            "c1",
+        ],
+    );
+    t.ok(Some("a2"), &["claim", "PAP-1-01", "--lease", "2d"]);
+    t.ok(
+        Some("a2"),
+        &["criteria", "PAP-1-01", "--check", "1", "--evidence", "seen"],
+    );
     let a = t.path("a.jsonl");
     let b = t.path("b.jsonl");
     t.ok(None, &["export", "--out", &p(&a)]);
+    let dump = std::fs::read_to_string(&a).unwrap();
+    for needle in [
+        "\"labels\":\"ui,db\"",
+        "\"evidence\":\"seen\"",
+        "\"lease_ms\":172800000",
+    ] {
+        assert!(dump.contains(needle), "{needle} missing from the export");
+    }
 
     let restored = t.path("restored.db");
     let run = |db: &std::path::Path, args: &[&str]| {

@@ -57,7 +57,7 @@ pub fn add_all(c: &Connection, env: &Env, id: &str, texts: &[String]) -> Result<
 
 pub fn list(c: &Connection, id: &str) -> Result<Vec<Value>> {
     let mut st = c.prepare(
-        "SELECT pos, text, done_at, done_by FROM criteria WHERE issue = ?1 ORDER BY pos",
+        "SELECT pos, text, done_at, done_by, evidence FROM criteria WHERE issue = ?1 ORDER BY pos",
     )?;
     let rows = st
         .query_map([id], |r| {
@@ -68,6 +68,7 @@ pub fn list(c: &Connection, id: &str) -> Result<Vec<Value>> {
                 "done": done_at.is_some(),
                 "done_at": iso_opt(done_at),
                 "done_by": r.get::<_, Option<String>>(3)?,
+                "evidence": r.get::<_, Option<String>>(4)?,
             }))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -112,15 +113,23 @@ fn render(id: &str, rows: &[Value]) -> String {
             " "
         };
         let _ = write!(out, "\n  [{mark}] {}. {}", r["n"], line(s(r, "text"), 160));
+        if !s(r, "evidence").is_empty() {
+            let _ = write!(out, "\n        evidence: {}", line(s(r, "evidence"), 160));
+        }
     }
     out
 }
 
-/// `ait criteria <ID> [--add "text"] [--check N] [--uncheck N] [--remove N]
-/// [--gen N] [--force]`. Without an option it lists them. Changes follow the
+/// `ait criteria <ID> [--add "text"] [--check N [--evidence "how"]]
+/// [--uncheck N] [--remove N] [--gen N] [--force]`. Without an option it lists them. Changes follow the
 /// same rule as edit: only the live claimant (or --force) on a claimed issue.
 pub fn cmd_criteria(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["add", "check", "uncheck", "remove", "gen", "force"], 1)?;
+    a.expect(
+        &[
+            "add", "check", "uncheck", "remove", "gen", "force", "evidence",
+        ],
+        1,
+    )?;
     let input = a.req_pos(0, "issue id")?;
     let adding = a.opt("add").map(parse_lines).transpose()?;
     let check = a.opt_i64("check")?;
@@ -138,6 +147,16 @@ pub fn cmd_criteria(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     if changes > 1 {
         return Err(AitError::usage(
             "use one of --add, --check, --uncheck, --remove at a time",
+        ));
+    }
+    let evidence = a.opt("evidence").map(str::trim).filter(|e| !e.is_empty());
+    if evidence.is_some() && check.is_none() {
+        return Err(AitError::usage("--evidence goes with --check N"));
+    }
+    if evidence.is_some_and(|e| e.chars().count() > MAX_TEXT) {
+        return Err(AitError::new(
+            "INVALID_INPUT",
+            format!("evidence is longer than {MAX_TEXT} characters"),
         ));
     }
     if changes == 0 {
@@ -180,14 +199,14 @@ pub fn cmd_criteria(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         } else if let Some(n) = check {
             exists(n)?;
             c.execute(
-                "UPDATE criteria SET done_at = ?3, done_by = ?4 WHERE issue = ?1 AND pos = ?2",
-                params![id, n, env.now, env.session],
+                "UPDATE criteria SET done_at = ?3, done_by = ?4, evidence = ?5 WHERE issue = ?1 AND pos = ?2",
+                params![id, n, env.now, env.session, evidence],
             )?;
-            json!({"checked": n})
+            json!({"checked": n, "evidence": evidence})
         } else if let Some(n) = uncheck {
             exists(n)?;
             c.execute(
-                "UPDATE criteria SET done_at = NULL, done_by = NULL WHERE issue = ?1 AND pos = ?2",
+                "UPDATE criteria SET done_at = NULL, done_by = NULL, evidence = NULL WHERE issue = ?1 AND pos = ?2",
                 params![id, n],
             )?;
             json!({"unchecked": n})

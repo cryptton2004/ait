@@ -718,3 +718,107 @@ fn released_features_show_complete_on_the_roadmap() {
     t.ok(None, &["ship", "CORE-2-00", "--force"]);
     assert_eq!(pct("CORE-2-00"), 100);
 }
+
+/// Labels: set on add/edit, normalized, filterable, kept by export/import.
+#[test]
+fn labels_are_set_filtered_and_validated() {
+    let t = T::new("labels");
+    let v = t.ok(
+        None,
+        &["add", "CORE", "login form", "--labels", "UI, Bug,ui"],
+    );
+    assert_eq!(v["issue"]["labels"], serde_json::json!(["ui", "bug"]));
+    t.ok(None, &["add", "CORE", "schema", "--labels", "db"]);
+    t.ok(None, &["add", "CORE", "plain"]);
+    let ids = |label: &str| -> Vec<String> {
+        t.ok(None, &["list", "--label", label])["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids("ui"), ["CORE-1-00"]);
+    assert_eq!(ids("db"), ["CORE-1-01"]);
+    assert_eq!(ids("ui,bug"), ["CORE-1-00"]);
+    let v = t.ok(None, &["edit", "CORE-1-01", "--labels", "db,perf"]);
+    assert_eq!(v["issue"]["labels"], serde_json::json!(["db", "perf"]));
+    let v = t.ok(None, &["edit", "CORE-1-01", "--labels", ""]);
+    assert_eq!(v["issue"]["labels"], serde_json::json!([]));
+    for bad in ["has space", "émoji", &"x".repeat(33)] {
+        assert_eq!(
+            t.err(None, &["add", "CORE", "x", "--labels", bad]).1,
+            "INVALID_INPUT",
+            "{bad}"
+        );
+    }
+}
+
+/// Checking a criterion can record how it was met.
+#[test]
+fn criteria_can_carry_evidence() {
+    let t = T::new("evidence");
+    t.ok(
+        None,
+        &["add", "CORE", "login", "--criteria", "rejects bad password"],
+    );
+    t.ok(Some("a1"), &["claim", "CORE-1-00"]);
+    let v = t.ok(
+        Some("a1"),
+        &[
+            "criteria",
+            "CORE-1-00",
+            "--check",
+            "1",
+            "--evidence",
+            "test login_rejects_bad_password passes",
+            "--gen",
+            "1",
+        ],
+    );
+    assert_eq!(
+        v["criteria"][0]["evidence"],
+        "test login_rejects_bad_password passes"
+    );
+    let v = t.ok(None, &["show", "CORE-1-00"]);
+    assert_eq!(
+        v["criteria"][0]["evidence"],
+        "test login_rejects_bad_password passes"
+    );
+    // Unchecking clears it; evidence needs --check.
+    let v = t.ok(
+        Some("a1"),
+        &["criteria", "CORE-1-00", "--uncheck", "1", "--gen", "1"],
+    );
+    assert!(v["criteria"][0]["evidence"].is_null(), "{v}");
+    assert_eq!(
+        t.err(
+            Some("a1"),
+            &["criteria", "CORE-1-00", "--evidence", "x", "--gen", "1"]
+        )
+        .1,
+        "USAGE"
+    );
+}
+
+/// `add` warns about open issues with nearly the same title, and adds anyway.
+#[test]
+fn add_warns_about_likely_duplicates() {
+    let t = T::new("dups");
+    t.ok(
+        None,
+        &["add", "CORE", "Login form rejects a wrong password"],
+    );
+    t.ok(None, &["add", "CORE", "Database schema migration"]);
+    let v = t.ok(None, &["add", "CORE", "login form: reject wrong password"]);
+    assert_eq!(v["issue"]["id"], "CORE-1-02");
+    let d = v["possible_duplicates"].as_array().unwrap();
+    assert_eq!(d.len(), 1, "{v}");
+    assert_eq!(d[0]["id"], "CORE-1-00");
+    // Unrelated titles and finished issues are not reported.
+    let v = t.ok(None, &["add", "CORE", "Dashboard dark mode"]);
+    assert_eq!(v["possible_duplicates"], serde_json::json!([]));
+    t.ok(None, &["done", "CORE-1-01", "--summary", "x", "--force"]);
+    let v = t.ok(None, &["add", "CORE", "database schema migration"]);
+    assert_eq!(v["possible_duplicates"], serde_json::json!([]));
+}

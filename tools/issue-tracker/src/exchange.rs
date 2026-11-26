@@ -54,6 +54,7 @@ const TABLES: &[(&str, &str, &[&str], &str)] = &[
             "ran",
             "released_at",
             "release_ref",
+            "labels",
         ],
         "id",
     ),
@@ -106,6 +107,7 @@ const TABLES: &[(&str, &str, &[&str], &str)] = &[
             "done_at",
             "done_by",
             "created_at",
+            "evidence",
         ],
         "id",
     ),
@@ -701,6 +703,15 @@ pub fn import_issues(
             if !labels.is_empty() {
                 body = format!("{}\n\nLabels: {}", body.trim_end(), labels.join(", "));
             }
+            // Valid labels also become real labels (the body keeps them too).
+            let label_field = crate::issues::parse_labels(&labels.join(",")).unwrap_or_else(|_| {
+                labels
+                    .iter()
+                    .filter_map(|l| crate::issues::parse_labels(l).ok())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
             if let Some(src) = str_field(o, "source") {
                 body = format!("{}\n\nSource: {src}", body.trim_end());
             }
@@ -745,6 +756,12 @@ pub fn import_issues(
                     problems.push(problem("BAD_RECORD", format!("line {ln} ({}): {e}", r.id)));
                     continue;
                 }
+            }
+            if !label_field.is_empty() {
+                c.execute(
+                    "UPDATE issues SET labels = ?2 WHERE id = ?1",
+                    params![r.id, label_field],
+                )?;
             }
             for n in needs {
                 let (id, until) = match n.split_once(':') {

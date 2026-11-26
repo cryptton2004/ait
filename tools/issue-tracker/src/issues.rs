@@ -62,9 +62,9 @@ pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const MAX_TITLE: usize = 300;
 const MAX_BODY: usize = 1_000_000;
 
-pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at, type, priority, agent, effort, reviewer, release, ran, released_at, release_ref";
+pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at, type, priority, agent, effort, reviewer, release, ran, released_at, release_ref, labels";
 /// Number of columns in `COLS` (extra joined columns start at this index).
-pub const NCOLS: usize = 24;
+pub const NCOLS: usize = 25;
 
 pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -92,7 +92,48 @@ pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
         "ran": r.get::<_, Option<String>>(21)?,
         "released_at": iso_opt(r.get::<_, Option<i64>>(22)?),
         "release_ref": r.get::<_, Option<String>>(23)?,
+        "labels": label_list(&r.get::<_, String>(24)?),
     }))
+}
+
+/// Labels are stored as `a,b,c`; JSON shows them as a list.
+pub fn label_list(stored: &str) -> Vec<String> {
+    stored
+        .split(',')
+        .filter(|x| !x.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+const MAX_LABELS: usize = 20;
+
+/// Normalizes `--labels a, B ,c` to `a,b,c` (lowercase words of letters,
+/// digits, `-` and `_`, at most 32 characters, no duplicates). Empty clears.
+pub fn parse_labels(v: &str) -> Result<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in v.split(',').map(|x| x.trim().to_ascii_lowercase()) {
+        if l.is_empty() || out.contains(&l) {
+            continue;
+        }
+        if l.len() > 32
+            || !l
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        {
+            return Err(AitError::new(
+                "INVALID_INPUT",
+                format!("label '{l}' must be a word of a-z, 0-9, - or _ (at most 32 characters)"),
+            ));
+        }
+        out.push(l);
+    }
+    if out.len() > MAX_LABELS {
+        return Err(AitError::new(
+            "INVALID_INPUT",
+            format!("at most {MAX_LABELS} labels per issue"),
+        ));
+    }
+    Ok(out.join(","))
 }
 
 /// Adds `agent_model`: the model the configured tier maps to.
@@ -652,6 +693,7 @@ struct Fields {
     agent: Option<String>,
     effort: Option<String>,
     reviewer: Option<String>,
+    labels: Option<String>,
 }
 
 fn read_fields(a: &Args, cfg: &Config) -> Result<Fields> {
@@ -675,12 +717,14 @@ fn read_fields(a: &Args, cfg: &Config) -> Result<Fields> {
     if let Some(x) = reviewer.as_deref().filter(|x| !x.is_empty()) {
         check_reviewer(x)?;
     }
+    let labels = a.opt("labels").map(parse_labels).transpose()?;
     Ok(Fields {
         kind,
         priority,
         agent,
         effort,
         reviewer,
+        labels,
     })
 }
 
@@ -709,6 +753,7 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "reviewer",
             "release",
             "criteria",
+            "labels",
         ],
         2,
     )?;
@@ -788,6 +833,12 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 release,
             ],
         )?;
+        if let Some(l) = &f.labels {
+            c.execute(
+                "UPDATE issues SET labels = ?2 WHERE id = ?1",
+                params![id, l],
+            )?;
+        }
         for (n, until) in &needs {
             add_link_until(c, &id, "needs", n, until.as_deref())?;
         }
@@ -809,14 +860,68 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "add",
             json!({"title": title, "state": state, "needs": needs, "discovered_from": disc}),
         )?;
-        get_full(c, &env.cfg, &id)
+        let dups = similar_open(c, &id, &title)?;
+        Ok((get_full(c, &env.cfg, &id)?, dups))
     })?;
-    let text = format!(
+    let (issue, dups) = issue;
+    let mut text = format!(
         "added {}  {}",
         s(&issue, "id"),
         line(s(&issue, "title"), 80)
     );
-    Ok(Output::new(json!({ "issue": issue }), text))
+    for d in &dups {
+        let _ = write!(
+            text,
+            "\n  possible duplicate: {} [{}] {}",
+            s(d, "id"),
+            s(d, "state"),
+            line(s(d, "title"), 80)
+        );
+    }
+    Ok(Output::new(
+        json!({ "issue": issue, "possible_duplicates": dups }),
+        text,
+    ))
+}
+
+/// Lowercase words of 3+ letters or digits, the unit of title similarity.
+fn title_words(t: &str) -> HashSet<String> {
+    t.split(|ch: char| !ch.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.chars().count() >= 3)
+        .collect()
+}
+
+/// Open issues whose title shares most of its words with `title` (at least
+/// 60% of the words of the two titles together, or the same words). Only a
+/// warning: the new issue is added anyway.
+fn similar_open(c: &Connection, id: &str, title: &str) -> Result<Vec<Value>> {
+    let mine = title_words(title);
+    if mine.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut st = c.prepare(
+        "SELECT id, title, state FROM issues
+         WHERE id <> ?1 AND state NOT IN ('done', 'released', 'dropped')",
+    )?;
+    let rows: Vec<(String, String, String)> = st
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut hits: Vec<(f64, Value)> = Vec::new();
+    for (oid, otitle, ostate) in rows {
+        let theirs = title_words(&otitle);
+        let common = mine.intersection(&theirs).count();
+        let all = mine.union(&theirs).count();
+        if all == 0 {
+            continue;
+        }
+        let score = common as f64 / all as f64;
+        if score >= 0.6 {
+            hits.push((score, json!({"id": oid, "title": otitle, "state": ostate})));
+        }
+    }
+    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok(hits.into_iter().take(5).map(|h| h.1).collect())
 }
 
 pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
@@ -836,6 +941,7 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "effort",
             "reviewer",
             "release",
+            "labels",
             "force",
             "gen",
         ],
@@ -932,6 +1038,9 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         if f.reviewer.is_some() {
             set("reviewer", none_if_empty(f.reviewer.clone()))?;
         }
+        if let Some(l) = &f.labels {
+            set("labels", Some(l.clone()))?;
+        }
         if let Some(v) = a.opt("release") {
             let r = if v.trim().is_empty() {
                 None
@@ -947,7 +1056,7 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         }
         if changed.is_empty() {
             return Err(AitError::usage(
-                "nothing to change (use --title, --body, --size, --spec, --parent, --legacy, --type, --priority, --agent, --effort, --reviewer, --release)",
+                "nothing to change (use --title, --body, --size, --spec, --parent, --legacy, --type, --priority, --agent, --effort, --reviewer, --release, --labels)",
             ));
         }
         c.execute(
@@ -1386,7 +1495,7 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
     a.expect(
         &[
             "state", "prefix", "ready", "claimed", "stale", "all", "limit", "type", "priority",
-            "agent", "parent", "release", "tree",
+            "agent", "parent", "release", "tree", "label",
         ],
         0,
     )?;
@@ -1403,6 +1512,7 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         check_priority(p)?;
     }
     let agents = csv(a.opt("agent"), false);
+    let labels = csv(a.opt("label"), false);
     let prefix = a.opt("prefix").map(|p| p.trim().to_ascii_uppercase());
     let limit = a.opt_i64("limit")?.unwrap_or(500).clamp(1, 100_000);
     let tree = a.flag("tree");
@@ -1452,6 +1562,11 @@ pub fn cmd_list(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 && (agents.is_empty() || agents.iter().any(|x| x == s(&v, "agent")))
                 && parent.as_deref().is_none_or(|p| s(&v, "parent") == p)
                 && release.as_deref().is_none_or(|p| s(&v, "release") == p)
+                && labels.iter().all(|l| {
+                    v["labels"]
+                        .as_array()
+                        .is_some_and(|x| x.iter().any(|y| y.as_str() == Some(l.as_str())))
+                })
                 && (!a.flag("ready") || ready.contains(&id))
                 && (!a.flag("claimed") || claim_status == "live")
                 && (!a.flag("stale") || claim_status == "stale");
