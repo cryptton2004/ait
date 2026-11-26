@@ -148,6 +148,22 @@ fn serve_answers_dashboard_and_api_on_localhost_only() {
     let (code, page) = get(port, "/");
     assert_eq!(code, 200);
     assert!(page.contains("<title>ait board</title>"));
+    // Without allowed_origins no other page may frame the dashboard.
+    let mut raw = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    raw.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    raw.write_all(
+        format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:5173\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let mut head = String::new();
+    raw.read_to_string(&mut head).unwrap();
+    let head = head.split("\r\n\r\n").next().unwrap_or("");
+    assert!(head.contains("X-Frame-Options: DENY"), "{head}");
+    assert!(head.contains("frame-ancestors 'none'"), "{head}");
+    assert!(!head.contains("Access-Control-Allow-Origin"), "{head}");
     let (code, head) = get(port, "/api/head");
     assert_eq!(code, 200);
     let head: serde_json::Value = serde_json::from_str(&head).unwrap();
@@ -485,6 +501,11 @@ fn allowed_origin_can_write_through_the_same_gates() {
     assert_eq!(v["api"], 1);
     assert_eq!(v["writable"], true);
     assert!(v["schema"].as_i64().unwrap() >= 4, "{v}");
+    // Bad query input is a 400 with the usual error object.
+    let (code, v) = get(port, "/api/stats?since=soon");
+    assert_eq!(code, 400, "{v}");
+    assert!(v.contains("\"error\""), "{v}");
+    assert_eq!(get(port, "/api/stats?since=7d").0, 200);
 
     // Preflight: allowed origin gets 204 and CORS headers, others 403.
     let pre = |origin: &str| {
@@ -508,6 +529,14 @@ fn allowed_origin_can_write_through_the_same_gates() {
         "{ok}"
     );
     assert!(ok.contains("X-Ait-Token"), "{ok}");
+    // Allowed origins may show the dashboard in a frame; nobody else may.
+    assert!(
+        ok.contains(
+            "Content-Security-Policy: frame-ancestors 'self' http://localhost:5173 http://127.0.0.1:3000\r\n"
+        ),
+        "{ok}"
+    );
+    assert!(!ok.contains("X-Frame-Options"), "{ok}");
     let bad = pre("http://evil.example");
     assert!(bad.starts_with("HTTP/1.1 403"), "{bad}");
     assert!(!bad.contains("Access-Control-Allow-Origin"), "{bad}");

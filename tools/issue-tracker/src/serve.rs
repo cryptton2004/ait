@@ -53,7 +53,7 @@ const MAX_BODY: usize = 2 * 1024 * 1024;
 pub const API_VERSION: i64 = 1;
 
 thread_local! {
-    /// CORS headers for the current request (one thread per request).
+    /// Per-request headers (framing policy, CORS); reset by every request.
     static CORS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
@@ -134,7 +134,7 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
 
 fn respond(s: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n{}Connection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n{}Connection: close\r\n\r\n",
         body.len(),
         CORS.with(|c| c.borrow().clone())
     );
@@ -241,6 +241,17 @@ fn read_request(s: &mut TcpStream) -> std::io::Result<std::result::Result<Reques
 }
 
 fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
+    // Reset the per-request headers first, so nothing leaks from an earlier
+    // request. Only the dashboard itself and allowed origins may frame it.
+    let frame = if base.cfg.allowed_origins.is_empty() {
+        "X-Frame-Options: DENY\r\nContent-Security-Policy: frame-ancestors 'none'\r\n".to_string()
+    } else {
+        format!(
+            "Content-Security-Policy: frame-ancestors 'self' {}\r\n",
+            base.cfg.allowed_origins.join(" ")
+        )
+    };
+    CORS.with(|c| *c.borrow_mut() = frame);
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     let req = match read_request(&mut s) {
@@ -266,14 +277,13 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
         .as_ref()
         .filter(|o| base.cfg.allowed_origins.contains(o))
         .cloned();
-    // Always reset, so no header can leak from an earlier request.
-    CORS.with(|c| {
-        *c.borrow_mut() = trusted.as_ref().map_or_else(String::new, |o| {
-            format!(
+    if let Some(o) = &trusted {
+        CORS.with(|c| {
+            c.borrow_mut().push_str(&format!(
                 "Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: GET, POST\r\nAccess-Control-Allow-Headers: Content-Type, X-Ait-Token\r\nAccess-Control-Max-Age: 600\r\n"
-            )
+            ));
         });
-    });
+    }
     if req.method == "OPTIONS" {
         return if trusted.is_some() {
             respond(&mut s, "204 No Content", "text/plain", b"")
@@ -371,8 +381,8 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
     };
     match result {
         Ok(v) => json_resp(&mut s, "200 OK", &v),
-        Err(e) if e.code == "NOT_FOUND" => json_resp(&mut s, "404 Not Found", &e.to_json()),
-        Err(e) => json_resp(&mut s, "500 Internal Server Error", &e.to_json()),
+        // Same status mapping as /api/run (a bad ?since= is a 400).
+        Err(e) => json_resp(&mut s, status_for(e.exit_code()), &e.to_json()),
     }
 }
 
