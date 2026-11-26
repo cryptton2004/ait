@@ -251,6 +251,9 @@ pub fn open_reviews(c: &Connection, id: &str) -> Result<(i64, Vec<String>)> {
 
 /// Moving `id` to in_review hands the work over: the claim is released.
 pub fn submit_for_review(c: &Connection, env: &Env, id: &str, force: bool) -> Result<()> {
+    if !force {
+        crate::criteria::require_all_checked(c, id, "review")?;
+    }
     if !force && let Some(w) = wip_review_block(c, env)? {
         return Err(AitError::new("WIP_LIMIT", w).retryable());
     }
@@ -792,6 +795,9 @@ pub fn cmd_done(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 "REVIEWS_OPEN",
                 format!("{id} has open reviews: {}{hint}", open.join(", ")),
             ));
+        }
+        if !force {
+            crate::criteria::require_all_checked(c, &id, "done")?;
         }
         // Reviewed work is closed by its passed reviews, not by a claim.
         let reviewed = state == "in_review" && n_reviews > 0;

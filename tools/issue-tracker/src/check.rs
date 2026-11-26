@@ -390,6 +390,17 @@ pub fn run_checks(c: &Connection, env: &Env, opt: &Checks) -> Result<(Vec<Value>
             format!("notes for missing issue {id}"),
         ));
     }
+    for r in strings(
+        c,
+        "SELECT DISTINCT k.issue FROM criteria k LEFT JOIN issues i ON i.id = k.issue WHERE i.id IS NULL",
+    )? {
+        let id = r[0].clone().unwrap_or_default();
+        p.push(problem(
+            "ORPHAN_CRITERIA",
+            Some(&id),
+            format!("acceptance criteria for missing issue {id}"),
+        ));
+    }
     if opt.approvals
         && let Err(e) = claims::load_approvals(env)
     {

@@ -82,6 +82,10 @@ button.danger { color: var(--bad); }
 .form .full { grid-column: 1 / -1; }
 input, select, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; width: 100%; min-width: 0; }
 textarea { min-height: 140px; font: 12px ui-monospace, Consolas, monospace; resize: vertical; }
+.crit { list-style: none; margin: 4px 0 8px; padding: 0; font-size: 13px; }
+.crit li { display: flex; gap: 6px; align-items: flex-start; padding: 2px 0; overflow-wrap: anywhere; }
+.crit input { width: auto; margin-top: 3px; }
+.crit .done { color: var(--muted); text-decoration: line-through; }
 .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; width: min(560px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(0, 0, 0, .35); }
@@ -479,6 +483,9 @@ function newDialog() {
     const nd = field(g, "Needs", inp("", "ids, comma separated; ID:in_review waits for that state"));
     const ag = field(g, "Agent", inp("", "tier, e.g. standard (optional)"));
     const ef = field(g, "Effort", sel(EFFORTS, ""));
+    const ac = field(g, "Acceptance criteria", el("textarea"), true);
+    ac.placeholder = "one per line; all must be checked before review or done";
+    ac.style.minHeight = "60px";
     const bd = field(g, "Description", el("textarea"), true);
     bd.placeholder = "Markdown";
     return () => {
@@ -488,7 +495,7 @@ function newDialog() {
       const a = ["add", pf.value.trim(), ti.value.trim(), "--type", ty.value, "--priority", pr.value, "--state", st.value];
       const opt = (name, v) => { if (v.trim()) a.push("--" + name, v.trim()); };
       opt("reason", rs.value); opt("parent", pa.value); opt("release", rl.value); opt("needs", nd.value);
-      opt("agent", ag.value); opt("effort", ef.value); opt("body", bd.value);
+      opt("agent", ag.value); opt("effort", ef.value); opt("criteria", ac.value); opt("body", bd.value);
       return a;
     };
   }, "Add issue", a => act(a, "issue added", res => { if (res && res.issue) showDetail(res.issue.id); }));
@@ -527,6 +534,30 @@ async function showDetail(id) {
       btn("Top", null, () => act(["move", i.id, "--top"], i.id + " ranks first"));
       btn("Bottom", null, () => act(["move", i.id, "--bottom"], i.id + " ranks last"));
       box.append(row);
+    }
+    const crit = v.criteria || [];
+    if (crit.length || WRITABLE) {
+      const openN = crit.filter(x => !x.done).length;
+      box.append(el("h3", null, "Acceptance criteria" + (crit.length ? " (" + (crit.length - openN) + "/" + crit.length + ")" : "")));
+      const ul = el("ul", "crit");
+      for (const x of crit) {
+        const li = el("li");
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = x.done;
+        cb.disabled = !WRITABLE;
+        cb.title = x.done ? "checked by " + (x.done_by || "-") + " " + ago(x.done_at) : "not checked yet";
+        cb.addEventListener("change", () => act(["criteria", i.id, x.done ? "--uncheck" : "--check", String(x.n)], "criterion " + x.n + (x.done ? " unchecked" : " checked"), () => showDetail(i.id)));
+        li.append(cb, el("span", x.done ? "done" : null, x.text));
+        ul.append(li);
+      }
+      if (!crit.length) ul.append(el("li", "w", "none"));
+      box.append(ul);
+      if (WRITABLE && !FINISHED.includes(i.state)) {
+        const ni = inp("", "add a criterion");
+        ni.addEventListener("keydown", e => { if (e.key === "Enter" && ni.value.trim()) act(["criteria", i.id, "--add", ni.value.trim()], "criterion added", () => showDetail(i.id)); });
+        box.append(ni);
+      }
     }
     if (i.body) box.append(el("pre", null, i.body));
     if (v.latest_handoff) { box.append(el("h3", null, "Latest handoff")); box.append(el("pre", null, v.latest_handoff.body)); }

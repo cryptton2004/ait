@@ -14,6 +14,7 @@ mod board;
 mod check;
 mod claims;
 mod config;
+mod criteria;
 mod db;
 mod error;
 mod exchange;
@@ -156,6 +157,7 @@ pub fn dispatch(cmd: &str, c: &rusqlite::Connection, env: &db::Env, a: &Args) ->
         "heartbeat" => claims::cmd_heartbeat(c, env, a),
         "verify" => claims::cmd_verify(c, env, a),
         "note" => notes::cmd_note(c, env, a),
+        "criteria" => criteria::cmd_criteria(c, env, a),
         "handoff" => notes::cmd_handoff(c, env, a),
         "brief" => notes::cmd_brief(c, env, a),
         "board" => board::cmd_board(c, env, a),

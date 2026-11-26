@@ -708,10 +708,16 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "effort",
             "reviewer",
             "release",
+            "criteria",
         ],
         2,
     )?;
     let spec = a.req_pos(0, "PREFIX (e.g. CORE), group (CORE-2) or full id")?;
+    let new_criteria = a
+        .opt("criteria")
+        .map(crate::criteria::parse_lines)
+        .transpose()?
+        .unwrap_or_default();
     let title = check_title(a.req_pos(1, "title")?)?;
     let body = read_text(a, "body")?.unwrap_or_default();
     let state = a.opt("state").unwrap_or("ready");
@@ -790,6 +796,7 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         if let Some(d) = &disc {
             add_link(c, &id, "discovered_from", d)?;
         }
+        crate::criteria::add_all(c, env, &id, &new_criteria)?;
         db::event(
             c,
             env,
@@ -1042,6 +1049,7 @@ pub fn cmd_delete(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         c.execute("UPDATE issues SET release = NULL WHERE release = ?1", [&id])?;
         c.execute("DELETE FROM claims WHERE issue = ?1", [&id])?;
         c.execute("DELETE FROM notes WHERE issue = ?1", [&id])?;
+        c.execute("DELETE FROM criteria WHERE issue = ?1", [&id])?;
         c.execute("DELETE FROM issues WHERE id = ?1", [&id])?;
         c.execute(
             "INSERT OR IGNORE INTO retired_ids(id, at) VALUES (?1, ?2)",
@@ -1193,6 +1201,7 @@ pub fn show_json(c: &Connection, env: &Env, id: &str, note_limit: i64) -> Result
         "latest_handoff": notes::latest_handoff(c, id)?,
         "notes": notes::recent(c, id, note_limit)?,
         "note_count": notes::count(c, id)?,
+        "criteria": crate::criteria::list(c, id)?,
     }))
 }
 
@@ -1272,6 +1281,19 @@ fn render_show(v: &Value, now: i64) -> String {
     }
     if v["rollup"].is_object() {
         let _ = writeln!(out, "rollup: {}", roadmap::rollup_line(&v["rollup"]));
+    }
+    if let Some(cr) = v["criteria"].as_array()
+        && !cr.is_empty()
+    {
+        let _ = writeln!(out, "acceptance criteria:");
+        for x in cr {
+            let mark = if x["done"].as_bool().unwrap_or(false) {
+                "x"
+            } else {
+                " "
+            };
+            let _ = writeln!(out, "  [{mark}] {}. {}", x["n"], line(s(x, "text"), 160));
+        }
     }
     let l = &v["links"];
     render_refs(&mut out, "needs", &l["needs"]);

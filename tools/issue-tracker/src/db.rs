@@ -95,6 +95,19 @@ pub const MIGRATIONS: &[&str] = &[
     ALTER TABLE issues ADD COLUMN released_at INTEGER;
     ALTER TABLE issues ADD COLUMN release_ref TEXT;
     ",
+    // 4: acceptance criteria
+    "
+    CREATE TABLE criteria (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue TEXT NOT NULL,
+        pos INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        done_at INTEGER,
+        done_by TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX criteria_issue ON criteria(issue, pos);
+    ",
 ];
 
 pub fn schema_version() -> i64 {

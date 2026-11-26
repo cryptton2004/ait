@@ -94,6 +94,20 @@ const TABLES: &[(&str, &str, &[&str], &str)] = &[
         &["seq", "at", "session", "issue", "action", "details"],
         "seq",
     ),
+    (
+        "criterion",
+        "criteria",
+        &[
+            "id",
+            "issue",
+            "pos",
+            "text",
+            "done_at",
+            "done_by",
+            "created_at",
+        ],
+        "id",
+    ),
     ("meta", "meta", &["key", "value"], "key"),
 ];
 
@@ -429,6 +443,7 @@ const ISSUE_KEYS: &[&str] = &[
     "done_summary",
     "summary",
     "source",
+    "criteria",
 ];
 
 pub fn import_issues(
@@ -740,6 +755,21 @@ pub fn import_issues(
             for n in relates {
                 let id = n.split(':').next().unwrap_or_default().to_string();
                 links.push((r.id.clone(), "relates", id, None));
+            }
+            match list_field(o, "criteria") {
+                Ok(list) => {
+                    let texts = crate::criteria::parse_lines(&list.join("\n"))?;
+                    crate::criteria::add_all(c, env, &r.id, &texts)?;
+                    if state == "done" || state == "released" {
+                        c.execute(
+                            "UPDATE criteria SET done_at = ?2 WHERE issue = ?1",
+                            params![r.id, env.now],
+                        )?;
+                    }
+                }
+                Err(e) => {
+                    problems.push(problem("BAD_RECORD", format!("line {ln} ({}): {e}", r.id)))
+                }
             }
         }
         for (src, kind, dst, until) in &links {

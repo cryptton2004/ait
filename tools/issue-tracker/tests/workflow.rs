@@ -429,3 +429,103 @@ fn wip_limits_per_column_and_agent_tier() {
     c.arg("--config").arg(&bad);
     assert_eq!(err_code(&t.exec(c).json), "CONFIG");
 }
+
+#[test]
+fn acceptance_criteria_gate_review_and_done() {
+    let t = T::new("criteria");
+    t.ok(
+        None,
+        &[
+            "add",
+            "CORE",
+            "login",
+            "--criteria",
+            "- [ ] accepts a password\n- [ ] locks after 5 tries\n\n",
+        ],
+    );
+    let v = t.ok(None, &["criteria", "CORE-1-00"]);
+    assert_eq!(v["criteria"].as_array().unwrap().len(), 2);
+    assert_eq!(v["criteria"][1]["text"], "locks after 5 tries");
+    t.ok(Some("a1"), &["claim", "CORE-1-00"]);
+    assert_eq!(
+        t.err(
+            Some("a1"),
+            &["state", "CORE-1-00", "in_review", "--gen", "1"]
+        )
+        .1,
+        "CRITERIA_OPEN"
+    );
+    assert_eq!(
+        t.err(
+            Some("a1"),
+            &["done", "CORE-1-00", "--summary", "x", "--gen", "1"]
+        )
+        .1,
+        "CRITERIA_OPEN"
+    );
+    // Only the claimant ticks them while the issue is claimed.
+    assert_eq!(
+        t.err(Some("a2"), &["criteria", "CORE-1-00", "--check", "1"])
+            .1,
+        "NOT_CLAIMANT"
+    );
+    t.ok(
+        Some("a1"),
+        &["criteria", "CORE-1-00", "--check", "1", "--gen", "1"],
+    );
+    t.ok(
+        Some("a1"),
+        &[
+            "criteria",
+            "CORE-1-00",
+            "--add",
+            "logs failures",
+            "--gen",
+            "1",
+        ],
+    );
+    assert_eq!(
+        t.err(
+            Some("a1"),
+            &["criteria", "CORE-1-00", "--check", "9", "--gen", "1"]
+        )
+        .1,
+        "NOT_FOUND"
+    );
+    t.ok(
+        Some("a1"),
+        &["criteria", "CORE-1-00", "--remove", "2", "--gen", "1"],
+    );
+    let v = t.ok(None, &["show", "CORE-1-00"]);
+    let texts: Vec<&str> = v["criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["accepts a password", "logs failures"]);
+    assert_eq!(v["criteria"][1]["n"], 2);
+    assert_eq!(v["criteria"][0]["done_by"], "a1");
+    t.ok(
+        Some("a1"),
+        &["criteria", "CORE-1-00", "--check", "2", "--gen", "1"],
+    );
+    let v = t.ok(
+        Some("a1"),
+        &["state", "CORE-1-00", "in_review", "--gen", "1"],
+    );
+    assert_eq!(v["issue"]["state"], "in_review");
+    // Criteria survive export and import.
+    let out = t.path("e.jsonl");
+    t.ok(None, &["export", "--out", &p(&out)]);
+    let mut c = t.bare();
+    c.arg("--db")
+        .arg(t.path("copy.db"))
+        .args(["--json", "import", &p(&out)]);
+    assert_eq!(t.exec(c).code, 0);
+    let mut c = t.bare();
+    c.arg("--db")
+        .arg(t.path("copy.db"))
+        .args(["--json", "criteria", "CORE-1-00"]);
+    assert_eq!(t.exec(c).json["criteria"][1]["done"], true);
+}
