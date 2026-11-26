@@ -1,0 +1,6 @@
+{
+  "approvals": [
+    { "match": "CORE-1", "scope": "build", "until": "2026-12-31", "exclude": ["CORE-1-05"] },
+    { "match": "PAP-2-01", "scope": "build" }
+  ]
+}

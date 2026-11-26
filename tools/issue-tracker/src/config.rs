@@ -205,6 +205,21 @@ mod tests {
     }
 
     #[test]
+    fn shipped_default_cfg_is_valid() {
+        let c = parse(include_str!("../default.cfg"), Path::new("base")).unwrap();
+        assert!(c.db.is_none());
+        assert_eq!(c.lease_minutes, 60);
+        assert_eq!(c.backup_keep, 14);
+        assert_eq!(c.approvals, Some(Path::new("base").join("approvals.json")));
+    }
+
+    #[test]
+    fn shipped_approvals_example_is_valid() {
+        let a = crate::approvals::parse(include_str!("../approvals.example.json")).unwrap();
+        assert!(a.in_use());
+    }
+
+    #[test]
     fn auto_db_is_none() {
         assert!(parse("db = auto", Path::new(".")).unwrap().db.is_none());
     }

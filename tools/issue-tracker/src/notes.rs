@@ -167,7 +167,7 @@ fn md_refs(out: &mut String, label: &str, v: &Value) {
 
 /// A self-contained Markdown brief for a session that cannot reach the DB.
 pub fn cmd_brief(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["notes"], 1)?;
+    a.expect(&["notes", "out"], 1)?;
     let input = a.req_pos(0, "issue id")?;
     let limit = a.opt_i64("notes")?.unwrap_or(10).clamp(0, 200);
     let v = db::read(c, |c| {
@@ -245,5 +245,12 @@ pub fn cmd_brief(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         "---\n\n## When you stop\n\nWrite `HANDOFF.md` at the root of your branch with: what is done, what remains, decisions made, the branch name and the last commit. Back on the PC it is recorded with:\n\n    ait handoff {id} --from-file HANDOFF.md\n\nCommits that complete this issue carry the trailer `{}: {id}`.",
         env.cfg.trailer
     );
+    if let Some(path) = a.opt("out") {
+        std::fs::write(path, md.as_bytes())?;
+        return Ok(Output::new(
+            json!({"id": id, "out": path}),
+            format!("brief for {id} written to {path}"),
+        ));
+    }
     Ok(Output::new(json!({"id": id, "markdown": md}), md))
 }

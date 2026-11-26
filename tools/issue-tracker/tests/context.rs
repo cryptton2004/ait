@@ -74,6 +74,10 @@ fn brief_is_self_contained_markdown() {
     ] {
         assert!(md.contains(want), "brief misses {want:?}:\n{md}");
     }
+    let out = t.path("BRIEF.md");
+    t.ok(None, &["brief", "CORE-1-01", "--out", &p(&out)]);
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert!(written.starts_with("# Brief: CORE-1-01"));
 }
 
 #[test]

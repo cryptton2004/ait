@@ -34,7 +34,7 @@ Claims (need AIT_SESSION or --as)
 Context
   note <ID> \"text\" | --text-file f      append a note (never edited)
   handoff <ID> [\"text\" | --from-file f]  save a resume snapshot; no text = show latest
-  brief <ID>                            Markdown brief for a cloud session
+  brief <ID> [--out f]                  Markdown brief for a cloud session
 
 Progress
   board [--limit N]    activity [--since 1h] [--after SEQ] [--issue ID] [--limit N]
