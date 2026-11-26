@@ -130,7 +130,7 @@ input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 
 "use strict";
 // All tracker text is untrusted: it is only ever inserted with textContent
 // or as form values, never as HTML.
-const TOKEN = document.querySelector('meta[name="ait-token"]').content;
+let TOKEN = document.querySelector('meta[name="ait-token"]').content;
 const WRITABLE = document.querySelector('meta[name="ait-writable"]').content === "true" && /^[0-9a-f]{32}$/.test(TOKEN);
 // Left to right: the way work flows.
 const COLS = [
@@ -174,7 +174,17 @@ function ago(iso) {
 class AitError extends Error {
   constructor(e) { super(e.message || "error"); this.code = e.code || "ERROR"; }
 }
-async function run(args) {
+// `ait serve` makes a new token on every start. If the server was restarted
+// while this page stayed open, read the new token from the page once and
+// retry, instead of refusing every change until a reload.
+async function freshToken() {
+  try {
+    const page = await (await fetch("/", { cache: "no-store" })).text();
+    const m = page.match(/name="ait-token" content="([0-9a-f]{32})"/);
+    return m ? m[1] : null;
+  } catch (e) { return null; }
+}
+async function run(args, retried) {
   const r = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Ait-Token": TOKEN },
@@ -182,6 +192,11 @@ async function run(args) {
   });
   let v = {};
   try { v = await r.json(); } catch (e) { /* not JSON */ }
+  if (r.status === 403 && !retried && v.error && /token/.test(v.error.message || "")) {
+    const t = await freshToken();
+    if (t && t !== TOKEN) { TOKEN = t; return run(args, true); }
+    throw new AitError({ code: v.error.code, message: "The dashboard server was restarted or is read-only now. Reload the page." });
+  }
   if (!r.ok || v.error) throw new AitError(v.error || { message: "HTTP " + r.status });
   return v.result;
 }
