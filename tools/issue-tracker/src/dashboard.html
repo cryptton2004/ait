@@ -145,7 +145,8 @@ async function showDetail(id) {
     box.append(h, el("span", "chip", i.state + (i.reason ? ": " + i.reason : "")));
     if (v.claim && v.claim.session) box.append(el("span", "chip", "claimed by " + v.claim.session + " (gen " + v.claim.generation + ", " + v.claim.status + ")"));
     box.append(el("span", "chip", v.ready ? "ready" : "not offered"));
-    for (const b of v.blockers || []) box.append(el("div", "m", "• " + b.message));
+    if (i.summary) box.append(el("p", null, "Done: " + i.summary));
+    else for (const b of v.blockers || []) box.append(el("p", null, "• " + b.message));
     if (i.body) box.append(el("pre", null, i.body));
     if (v.latest_handoff) { box.append(el("h2", null, "Latest handoff")); box.append(el("pre", null, v.latest_handoff.body)); }
     if ((v.notes || []).length) {
