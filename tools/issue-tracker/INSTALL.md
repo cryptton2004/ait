@@ -131,9 +131,12 @@ Work comes from `ait`, at `tools/ait/ait.exe`. Do not pick work any other way.
    - `ait handoff <ID> "done: ... remaining: ... branch: ... last commit: ..." --gen GEN`
    - `ait heartbeat` during long silent steps; every ait call renews your lease.
 5. Found new work: `ait add <PREFIX> "title" --discovered-from <ID> --body "..."`.
+   If the reply lists `possible_duplicates`, check them; drop yours
+   (`ait state <NEW> dropped --reason "duplicate of <ID>"`) if one matches.
 6. Finish:
    - Check each acceptance criterion as you meet it:
-     `ait criteria <ID> --check N --gen GEN` (`ait criteria <ID>` lists them).
+     `ait criteria <ID> --check N --gen GEN --evidence "test or commit"`
+     (`ait criteria <ID>` lists them).
      All must be checked before review or done.
    - If the issue has review children (`--type review`), submit it with
      `ait state <ID> in_review --gen GEN` instead of `done`. That gives the

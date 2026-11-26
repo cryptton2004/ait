@@ -14,17 +14,17 @@ Planning
       [--needs ID[:state],ID] [--discovered-from ID] [--criteria \"one per line\"]
       [--type task|feature|milestone|release|review]
       [--priority P0..P4] [--agent tier] [--effort low..max] [--reviewer r]
-      [--release ID]
+      [--release ID] [--labels a,b] [--due YYYY-MM-DD]
   edit <ID> [same fields as add] [--version N] [--gen N] [--force]
   state <ID> <idea|planned|ready|blocked|decision|dropped|in_review> [--reason r] [--gen N] [--force]
   move <ID> --before ID | --after ID | --top | --bottom
   link <ID> needs|blocked-by|relates|discovered-from <ID> [--until planned|ready|in_review|done|released]
   unlink <ID> <kind> <ID>
-  criteria <ID> [--add \"text\" | --check N | --uncheck N | --remove N] [--gen N] [--force]
+  criteria <ID> [--add \"text\" | --check N [--evidence t] | --uncheck N | --remove N] [--gen N] [--force]
   delete <ID> [--force]
   show <ID> [--notes N]      list [--state a,b] [--prefix P] [--ready] [--claimed]
       [--stale] [--all] [--limit N] [--type t] [--priority P0,P1] [--agent tier]
-      [--parent ID] [--release ID] [--tree]
+      [--parent ID] [--release ID] [--label l] [--tree]
   roadmap [--all]            releases, milestones and features with progress
   ship <ID> [--ref r] [--force]   mark a release/epic and its done items released
 

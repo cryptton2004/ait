@@ -80,12 +80,12 @@ Every command accepts `--json` (machine output), `--as <session>`,
 
 | Command | What it does |
 |---|---|
-| `add <PREFIX\|PREFIX-N\|ID> "title"` | New issue. With a bare prefix the id follows the hierarchy: a feature, milestone or release opens a new group (`CORE-2-00`); an issue with `--parent` takes the next number in its parent's group (`CORE-2-01`); any other issue takes the next number in the newest group that is not a feature's (or opens one). `CORE-2` picks the next number in group 2, `CORE-1-05` exactly that id. Options: `--body`/`--body-file` (Markdown), `--after ID` (next free number after it, placed after it in the order), `--state` (default `ready`), `--reason`, `--size`, `--spec`, `--parent`, `--legacy`, `--needs A,B` (or `A:in_review` to wait only until A reaches that state), `--discovered-from ID`, `--criteria "one per line"` (acceptance criteria), `--type task\|feature\|milestone\|release\|review` (default task; a review needs `--parent`), `--priority P0..P4` (default P2), `--agent <tier>`, `--effort low\|medium\|high\|xhigh\|max`, `--reviewer <name>`, `--release <release or milestone id>` |
+| `add <PREFIX\|PREFIX-N\|ID> "title"` | New issue. With a bare prefix the id follows the hierarchy: a feature, milestone or release opens a new group (`CORE-2-00`); an issue with `--parent` takes the next number in its parent's group (`CORE-2-01`); any other issue takes the next number in the newest group that is not a feature's (or opens one). `CORE-2` picks the next number in group 2, `CORE-1-05` exactly that id. Options: `--body`/`--body-file` (Markdown), `--after ID` (next free number after it, placed after it in the order), `--state` (default `ready`), `--reason`, `--size`, `--spec`, `--parent`, `--legacy`, `--needs A,B` (or `A:in_review` to wait only until A reaches that state), `--discovered-from ID`, `--criteria "one per line"` (acceptance criteria), `--type task\|feature\|milestone\|release\|review` (default task; a review needs `--parent`), `--priority P0..P4` (default P2), `--agent <tier>`, `--effort low\|medium\|high\|xhigh\|max`, `--reviewer <name>`, `--release <release or milestone id>`, `--labels a,b` (lowercase words), `--due YYYY-MM-DD` (expected date; `--due ""` clears it). After adding, the reply lists open issues with a similar title (`possible_duplicates`) so you can drop a duplicate |
 | `edit <ID>` | Change any field `add` takes. `--version N` refuses the change if someone else changed the issue first. A claimed issue can only be edited by its claimant (`--gen N`), or with `--force` |
 | `state <ID> <state> [--reason r]` | `idea`, `planned`, `ready`, `blocked`, `decision`, `dropped`, `in_review`. `blocked`, `decision` and `dropped` need a reason. `in_review` submits the work for review (all acceptance criteria checked, gives the claim back). Use `done` to close an issue and `ship` to release it. Finished work is only reopened with `--force`; a claimed issue only changes by its claimant or with `--force` |
 | `move <ID> --before/--after ID \| --top \| --bottom` | Change the order (the order is what `next` follows) |
 | `link <ID> needs\|blocked-by\|relates\|discovered-from <ID> [--until state]` / `unlink …` | Links. `needs` (alias `blocked-by`) keeps the issue waiting until the other one is done, or reaches the `--until` state (`planned`, `ready`, `in_review`, `done`, `released`). Cycles are refused |
-| `criteria <ID>` | Acceptance criteria. No option lists them; `--add "text"` (one per line), `--check N`, `--uncheck N`, `--remove N`. Same claim rules as `edit` |
+| `criteria <ID>` | Acceptance criteria. No option lists them; `--add "text"` (one per line), `--check N [--evidence "test name, commit or link"]`, `--uncheck N`, `--remove N`. Same claim rules as `edit` |
 | `delete <ID> [--force]` | Deletes an issue. Refused if it is claimed or other issues need it, unless `--force`. The id is retired and never reused |
 | `show <ID> [--notes N]` | Issue, links, claim, readiness with reasons, latest handoff, recent notes |
 | `list` | `--state a,b`, `--prefix P`, `--ready`, `--claimed`, `--stale`, `--all` (include done and dropped), `--limit N`, `--type`, `--priority P0,P1`, `--agent tier`, `--parent ID`, `--release ID`, `--tree` (indented by parent) |
@@ -167,7 +167,7 @@ card onto a column changes its state and asks for what the command needs (a
 reason for Waiting, a summary for Done).
 
 Every change runs the same `ait` command the CLI would (`add`, `edit`,
-`state`, `move`, `done`, `note`, `link`, `unlink`, `ship`, `criteria`, `claim`, `release`), recorded as the session
+`state`, `move`, `done`, `note`, `link`, `unlink`, `ship`, `criteria`, `claim`, `release`, `delete`), recorded as the session
 `dashboard`, so the same checks apply. When the CLI would ask for `--force`
 (an agent's claim, closing without a claim, reopening done work), the
 dashboard shows the refusal and an explicit "Override (--force)" button.
@@ -175,7 +175,22 @@ Cards show stale claims with a badge (and a filter), column headers show
 WIP "live / limit", issue details have the acceptance checklist, and the
 Flow panel shows `ait stats` for 7 days, 30 days or all time. Dropping a card
 on In review submits it; dropping it on Released runs `ship`.
-Dropping a card on In progress claims it for you (session `dashboard`) with a lease you choose (60m prefilled, for example 2d); dropping it back on Ready releases it, and Done closes it with that claim. Deletes, imports and backups stay on the command line.
+Dropping a card on In progress claims it for you (session `dashboard`) with a lease you choose (60m prefilled, for example 2d); dropping it back on Ready releases it, and Done closes it with that claim. Imports and backups stay on the command line.
+
+The header switches between three views (remembered per browser) and has a
+search box that filters the board and the list:
+
+- **Board:** the columns above.
+- **List:** every issue, dropped ones included, 50 at a time with Load more.
+  Sort by any column, filter by state (or "open") and label, view, edit or
+  delete a row, and tick rows to change priority, state, parent or labels for
+  all of them at once.
+- **Releases:** each release with its expected date (overdue ones are
+  flagged) and progress, and a table of its features and issues (id, title,
+  state, assignee), plus the features not in a release yet.
+
+Checking a criterion asks for optional evidence; adding an issue warns about
+similar open titles with links to them.
 
 Safety: the server listens on 127.0.0.1 only and refuses other Host names.
 Each start creates a random token that only the dashboard page carries;

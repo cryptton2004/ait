@@ -48,12 +48,16 @@ Inputs accept a unique prefix of an id; outputs always use the full id.
 | `parent`, `release` | id or null | containers this issue belongs to |
 | `agent`, `agent_model` | string or null | recommended tier and the model it maps to |
 | `effort`, `size`, `spec`, `reviewer`, `reason`, `legacy` | string or null | planning fields |
+| `labels` | list of strings | lowercase words (a-z, 0-9, `-`, `_`), at most 20 |
+| `due` | `YYYY-MM-DD` or null | expected date (mainly for releases) |
 | `summary`, `ran`, `done_at` | null until done | what was delivered, by which model |
 | `released_at`, `release_ref` | null until shipped | when, and the git ref it shipped in |
 | `version` | int | bumped on every change; pass `--version N` to `edit` for optimistic locking |
 | `created_at`, `updated_at` | timestamp | |
 
-`list` items also carry `claim` (claim object or null).
+`list` items also carry `claim` (claim object or null). `add` also returns
+`possible_duplicates`: up to 5 open issues with a similar title
+(`{"id", "title", "state"}`), empty when none; it is a warning only.
 
 **States:** `idea`, `planned`, `ready`, `blocked`, `decision`, `dropped`,
 `in_review`, `done`, `released`. Finished = `done` or `released`.
@@ -70,7 +74,8 @@ claim's own lease length from `--lease`, or null for the configured
 default), `status` (`live` or `stale`).
 
 **Criterion object:** `n` (1-based position), `text`, `done` (bool),
-`done_at`, `done_by`.
+`done_at`, `done_by`, `evidence` (string or null: what proves it, from
+`criteria --check N --evidence "..."`).
 
 ## 3. Errors and exit codes
 
@@ -159,7 +164,7 @@ policy (see below), and close the connection.
 
 | path | body |
 |---|---|
-| `/api/version` | `{"api": 1, "ait": "0.1.0", "schema": 5, "writable": true}` |
+| `/api/version` | `{"api": 1, "ait": "0.1.0", "schema": 7, "writable": true}` |
 | `/api/head` | `{"head": N}` — latest event `seq`; poll this cheaply and refetch when it changes |
 | `/api/issues` | `{"head", "issues": [board item], "wip": {"in_progress": N, "in_review": N, "agent.<tier>": N}}` (configured limits only; count live items yourself from `issues`). Also `"agent_tiers": {tier: model}` (the configured `agent.<tier>` keys) |
 | `/api/issue/<ID>` | same object as `ait show --json` (50 notes) |
@@ -168,9 +173,12 @@ policy (see below), and close the connection.
 | `/api/roadmap` | same as `ait roadmap --json` |
 | `/api/stats?since=7d` | flow stats (`since` optional: `30m`, `12h`, `7d` ...) |
 | `/api/activity?after=SEQ&limit=N` | same as `ait activity --json` (`limit` at least 1, default 50; the newest `limit` events) |
+| `/api/list?q=&state=&type=&label=&sort=&dir=&offset=&limit=` | `{"total", "offset", "issues": [list item]}` for the List view. All issues including dropped. `q` matches id, title, body and labels; `state` is a state list or `open` (not finished, not dropped); `sort` is `id`, `state`, `title`, `priority`, `updated`, `assignee` or `created`; `dir` `asc`/`desc`; `limit` at least 1 (default 50) |
+| `/api/releases` | `{"releases": [release], "unplanned": [item]}` — releases ordered by `due` (no date last). A release: `id`, `title`, `type`, `state`, `due`, `assignee`, `claim_status`, `percent`, `items` (its direct members, features first, dropped last). An item: `id`, `title`, `type`, `state`, `assignee`, `claim_status`, `percent`. `unplanned`: features in no release or milestone |
+| `/api/events?max=S` | Server-Sent Events (`text/event-stream`). First `event: hello` with `{"head", "api"}`, then `event: change` (`id:` = head) with `{"head", "events"}` whenever the tracker changes (checked every second), `: ping` every 15 s. The stream ends after `max` seconds (1..600, default 600) and the browser reconnects (`retry: 2000`, `Last-Event-ID` honoured). At most 32 streams at once (503 `BUSY` after that) |
 
 **Board item** (`/api/issues`): `id`, `title`, `type`, `state`, `priority`,
-`order`, `parent`, `agent`, `reason`, `done_at`, `released_at`, `column`
+`order`, `parent`, `agent`, `reason`, `labels`, `done_at`, `released_at`, `column`
 (see board columns), `session`, `generation`, `lease_until` (claim, or
 null), `stale` (bool: claimed but the lease ran out), `wait` (string or
 null: why it is in `waiting`, why a backlog review has not started, or why a card in `ready` is not offered to agents).
@@ -196,7 +204,7 @@ X-Ait-Token: <token>
 ```
 
 - Allowed commands: `add`, `edit`, `state`, `move`, `done`, `note`, `link`,
-  `unlink`, `ship`, `criteria`, `claim`, `release`. Others → 400 `USAGE`.
+  `unlink`, `ship`, `criteria`, `claim`, `release`, `delete`. Others → 400 `USAGE`.
 - Refused options: `--db`, `--config`, `--as`, `--help`, `--body-file`,
   `--text-file`, `--from-file`, `--out` → 400 `USAGE`.
 - Writes are recorded as session `dashboard`. Changing an issue an agent
@@ -268,3 +276,6 @@ frame-ancestors 'self' <origins>`); without the setting every response says
   `--until`, WIP limits, acceptance criteria, container auto-rollup, flow
   stats, `allowed_origins`, `/api/version`, `/api/token`. `/api/issues` gained `agent_tiers`; claims gained `lease_minutes` and the
   dashboard may run `claim` and `release` (all additive).
+  Then (2026-11-27, additive, schema 7): issue `labels` and `due`, criterion
+  `evidence`, `possible_duplicates` on `add`, `/api/list`, `/api/releases`,
+  `/api/events`, and the dashboard may run `delete`.
