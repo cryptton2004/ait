@@ -117,6 +117,10 @@ pub const MIGRATIONS: &[&str] = &[
     ALTER TABLE issues ADD COLUMN labels TEXT NOT NULL DEFAULT '';
     ALTER TABLE criteria ADD COLUMN evidence TEXT;
     ",
+    // 7: an expected date (YYYY-MM-DD), mostly for releases and milestones
+    "
+    ALTER TABLE issues ADD COLUMN due TEXT;
+    ",
 ];
 
 pub fn schema_version() -> i64 {

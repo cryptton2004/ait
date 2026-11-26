@@ -822,3 +822,46 @@ fn add_warns_about_likely_duplicates() {
     let v = t.ok(None, &["add", "CORE", "database schema migration"]);
     assert_eq!(v["possible_duplicates"], serde_json::json!([]));
 }
+
+/// Releases carry an expected date; moving it is recorded with both dates.
+#[test]
+fn due_dates_are_validated_and_moves_recorded() {
+    let t = T::new("due");
+    let v = t.ok(
+        None,
+        &[
+            "add",
+            "REL",
+            "v1",
+            "--type",
+            "release",
+            "--due",
+            "2026-12-15",
+        ],
+    );
+    assert_eq!(v["issue"]["due"], "2026-12-15");
+    for bad in ["2026-13-01", "2026-02-30", "15/12/2026", "2026-1-5"] {
+        assert_eq!(
+            t.err(None, &["edit", "REL-1-00", "--due", bad]).1,
+            "INVALID_INPUT",
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        t.ok(None, &["edit", "REL-1-00", "--due", "2024-02-29"])["issue"]["due"],
+        "2024-02-29"
+    );
+    t.ok(None, &["edit", "REL-1-00", "--due", "2027-01-10"]);
+    let v = t.ok(None, &["activity", "--issue", "REL-1-00"]);
+    let moved = v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|e| e["details"]["due"].is_object())
+        .unwrap();
+    assert_eq!(moved["details"]["due"]["from"], "2024-02-29");
+    assert_eq!(moved["details"]["due"]["to"], "2027-01-10");
+    let v = t.ok(None, &["edit", "REL-1-00", "--due", ""]);
+    assert!(v["issue"]["due"].is_null(), "{v}");
+}

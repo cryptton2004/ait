@@ -784,3 +784,84 @@ fn list_view_shows_everything_with_filters_and_paging() {
     assert_eq!(code, 200, "{v}");
     assert_eq!(list("")["total"], 3);
 }
+
+/// The Releases view: releases by expected date with their planned items,
+/// and the features not planned into any release.
+#[test]
+fn releases_view_groups_features_by_release() {
+    let t = T::new("relview");
+    t.ok(
+        None,
+        &[
+            "add",
+            "REL",
+            "v2",
+            "--type",
+            "release",
+            "--due",
+            "2027-03-01",
+        ],
+    );
+    t.ok(
+        None,
+        &[
+            "add",
+            "REL",
+            "v1",
+            "--type",
+            "release",
+            "--due",
+            "2026-12-15",
+        ],
+    );
+    t.ok(
+        None,
+        &[
+            "add",
+            "CORE",
+            "Auth",
+            "--type",
+            "feature",
+            "--release",
+            "REL-2-00",
+        ],
+    );
+    t.ok(
+        None,
+        &[
+            "add",
+            "CORE",
+            "Billing",
+            "--type",
+            "feature",
+            "--release",
+            "REL-1-00",
+        ],
+    );
+    t.ok(None, &["add", "CORE", "Search", "--type", "feature"]);
+    t.ok(
+        None,
+        &["add", "CORE", "login task", "--parent", "CORE-1-00"],
+    );
+    t.ok(None, &["done", "CORE-1-01", "--summary", "ok", "--force"]);
+    t.ok(Some("a1"), &["claim", "CORE-2-00"]);
+    let (_server, port) = start_server(&t, &[]);
+    let (code, v) = get(port, "/api/releases");
+    assert_eq!(code, 200, "{v}");
+    let v: serde_json::Value = serde_json::from_str(&v).unwrap();
+    let rels = v["releases"].as_array().unwrap();
+    let order: Vec<&str> = rels.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(order, ["REL-2-00", "REL-1-00"], "{v}");
+    assert_eq!(rels[0]["due"], "2026-12-15");
+    assert_eq!(rels[0]["items"][0]["id"], "CORE-1-00");
+    assert_eq!(rels[0]["items"][0]["percent"], 100);
+    assert_eq!(rels[1]["items"][0]["id"], "CORE-2-00");
+    assert_eq!(rels[1]["items"][0]["assignee"], "a1");
+    let unplanned: Vec<&str> = v["unplanned"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(unplanned, ["CORE-3-00"]);
+}

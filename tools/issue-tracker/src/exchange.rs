@@ -55,6 +55,7 @@ const TABLES: &[(&str, &str, &[&str], &str)] = &[
             "released_at",
             "release_ref",
             "labels",
+            "due",
         ],
         "id",
     ),

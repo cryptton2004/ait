@@ -62,9 +62,9 @@ pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const MAX_TITLE: usize = 300;
 const MAX_BODY: usize = 1_000_000;
 
-pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at, type, priority, agent, effort, reviewer, release, ran, released_at, release_ref, labels";
+pub const COLS: &str = "id, title, body, state, reason, ord, size, spec, parent, legacy, summary, version, created_at, updated_at, done_at, type, priority, agent, effort, reviewer, release, ran, released_at, release_ref, labels, due";
 /// Number of columns in `COLS` (extra joined columns start at this index).
-pub const NCOLS: usize = 25;
+pub const NCOLS: usize = 26;
 
 pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -93,7 +93,42 @@ pub fn row_json(r: &Row) -> rusqlite::Result<Value> {
         "released_at": iso_opt(r.get::<_, Option<i64>>(22)?),
         "release_ref": r.get::<_, Option<String>>(23)?,
         "labels": label_list(&r.get::<_, String>(24)?),
+        "due": r.get::<_, Option<String>>(25)?,
     }))
+}
+
+/// `--due 2026-12-15`: a calendar date; empty clears it.
+pub fn parse_due(v: &str) -> Result<Option<String>> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    let bad = || {
+        AitError::new(
+            "INVALID_INPUT",
+            format!("due date '{v}' must be YYYY-MM-DD, e.g. 2026-12-15"),
+        )
+    };
+    let p: Vec<&str> = v.split('-').collect();
+    if p.len() != 3 || p[0].len() != 4 || p[1].len() != 2 || p[2].len() != 2 {
+        return Err(bad());
+    }
+    let n: Vec<u32> = p
+        .iter()
+        .map(|x| x.parse::<u32>().map_err(|_| bad()))
+        .collect::<Result<_>>()?;
+    let leap = n[0].is_multiple_of(4) && (!n[0].is_multiple_of(100) || n[0].is_multiple_of(400));
+    let days = match n[1] {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(bad()),
+    };
+    if !(2000..=2999).contains(&n[0]) || n[2] == 0 || n[2] > days {
+        return Err(bad());
+    }
+    Ok(Some(v.to_string()))
 }
 
 /// Labels are stored as `a,b,c`; JSON shows them as a list.
@@ -694,6 +729,8 @@ struct Fields {
     effort: Option<String>,
     reviewer: Option<String>,
     labels: Option<String>,
+    /// Some(None) clears the date.
+    due: Option<Option<String>>,
 }
 
 fn read_fields(a: &Args, cfg: &Config) -> Result<Fields> {
@@ -718,6 +755,7 @@ fn read_fields(a: &Args, cfg: &Config) -> Result<Fields> {
         check_reviewer(x)?;
     }
     let labels = a.opt("labels").map(parse_labels).transpose()?;
+    let due = a.opt("due").map(parse_due).transpose()?;
     Ok(Fields {
         kind,
         priority,
@@ -725,6 +763,7 @@ fn read_fields(a: &Args, cfg: &Config) -> Result<Fields> {
         effort,
         reviewer,
         labels,
+        due,
     })
 }
 
@@ -754,6 +793,7 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "release",
             "criteria",
             "labels",
+            "due",
         ],
         2,
     )?;
@@ -838,6 +878,9 @@ pub fn cmd_add(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 "UPDATE issues SET labels = ?2 WHERE id = ?1",
                 params![id, l],
             )?;
+        }
+        if let Some(Some(d)) = &f.due {
+            c.execute("UPDATE issues SET due = ?2 WHERE id = ?1", params![id, d])?;
         }
         for (n, until) in &needs {
             add_link_until(c, &id, "needs", n, until.as_deref())?;
@@ -942,6 +985,7 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             "reviewer",
             "release",
             "labels",
+            "due",
             "force",
             "gen",
         ],
@@ -971,6 +1015,9 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             .retryable());
         }
         let mut changed: Vec<&str> = Vec::new();
+        // A moved date is recorded with both values, so the history shows
+        // how a release slipped.
+        let mut due_moved: Option<Value> = None;
         let mut set = |col: &'static str, v: Option<String>| -> Result<()> {
             c.execute(
                 &format!("UPDATE issues SET {col} = ?2 WHERE id = ?1"),
@@ -1041,6 +1088,14 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         if let Some(l) = &f.labels {
             set("labels", Some(l.clone()))?;
         }
+        if let Some(d) = &f.due {
+            let before: Option<String> =
+                c.query_row("SELECT due FROM issues WHERE id = ?1", [&id], |r| r.get(0))?;
+            if before != *d {
+                due_moved = Some(json!({"from": before, "to": d}));
+            }
+            set("due", d.clone())?;
+        }
         if let Some(v) = a.opt("release") {
             let r = if v.trim().is_empty() {
                 None
@@ -1056,14 +1111,18 @@ pub fn cmd_edit(c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         }
         if changed.is_empty() {
             return Err(AitError::usage(
-                "nothing to change (use --title, --body, --size, --spec, --parent, --legacy, --type, --priority, --agent, --effort, --reviewer, --release, --labels)",
+                "nothing to change (use --title, --body, --size, --spec, --parent, --legacy, --type, --priority, --agent, --effort, --reviewer, --release, --labels, --due)",
             ));
         }
         c.execute(
             "UPDATE issues SET version = version + 1, updated_at = ?2 WHERE id = ?1",
             params![id, env.now],
         )?;
-        db::event(c, env, Some(&id), "edit", json!({ "fields": changed }))?;
+        let mut details = json!({ "fields": changed });
+        if let (Some(d), Some(o)) = (due_moved, details.as_object_mut()) {
+            o.insert("due".to_string(), d);
+        }
+        db::event(c, env, Some(&id), "edit", details)?;
         get_full(c, &env.cfg, &id)
     })?;
     let text = format!(

@@ -299,23 +299,7 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
         .skip(usize::try_from(offset).unwrap_or(0))
         .take(usize::try_from(limit).unwrap_or(50))
     {
-        let finished = issues::FINISHED.contains(&r.2.as_str());
-        // Progress: containers by their members, others by their own state
-        // or, while open, by their acceptance criteria.
-        let percent = if ["feature", "milestone", "release"].contains(&r.3.as_str()) {
-            crate::roadmap::rollup_with(c, env, &offered, &r.0)?["percent"]
-                .as_i64()
-                .unwrap_or(0)
-        } else if finished {
-            100
-        } else {
-            let (n, done): (i64, i64) = c.query_row(
-                "SELECT COUNT(*), COUNT(done_at) FROM criteria WHERE issue = ?1",
-                [&r.0],
-                |x| Ok((x.get(0)?, x.get(1)?)),
-            )?;
-            if n > 0 { done * 100 / n } else { 0 }
-        };
+        let percent = item_percent(c, env, &offered, &r.0, &r.3, &r.2)?;
         let live = r.9.is_some() && r.10.is_some_and(|l| l > env.now);
         out.push(json!({
             "id": r.0,
@@ -333,6 +317,131 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
         }));
     }
     Ok(json!({"total": total, "offset": offset, "issues": out}))
+}
+
+/// Progress of one issue: containers by their members, others by their own
+/// state or, while open, by their acceptance criteria.
+fn item_percent(
+    c: &Connection,
+    env: &Env,
+    offered: &[String],
+    id: &str,
+    kind: &str,
+    state: &str,
+) -> Result<i64> {
+    if ["feature", "milestone", "release"].contains(&kind) {
+        return Ok(crate::roadmap::rollup_with(c, env, offered, id)?["percent"]
+            .as_i64()
+            .unwrap_or(0));
+    }
+    if issues::FINISHED.contains(&state) {
+        return Ok(100);
+    }
+    let (n, done): (i64, i64) = c.query_row(
+        "SELECT COUNT(*), COUNT(done_at) FROM criteria WHERE issue = ?1",
+        [id],
+        |x| Ok((x.get(0)?, x.get(1)?)),
+    )?;
+    Ok(if n > 0 { done * 100 / n } else { 0 })
+}
+
+/// Rows of `sql` (one `?1` parameter) as release-view items.
+fn release_items(
+    c: &Connection,
+    env: &Env,
+    offered: &[String],
+    sql: &str,
+    p: &str,
+) -> Result<Vec<Value>> {
+    let mut st = c.prepare(sql)?;
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    );
+    let rows: Vec<Row> = st
+        .query_map([p], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for (id, title, kind, state, due, session, lease) in rows {
+        let live = session.is_some() && lease.is_some_and(|l| l > env.now);
+        out.push(json!({
+            "id": id,
+            "title": title,
+            "type": kind,
+            "state": state,
+            "due": due,
+            "assignee": session,
+            "claim_status": if session.is_none() { Value::Null } else if live { json!("live") } else { json!("stale") },
+            "percent": item_percent(c, env, offered, &id, &kind, &state)?,
+        }));
+    }
+    Ok(out)
+}
+
+/// `/api/releases`: every release and milestone, by expected date, with
+/// the issues planned into it (features first), plus the features that are
+/// not in any release yet.
+fn releases_view(c: &Connection, env: &Env) -> Result<Value> {
+    let ap = claims::load_approvals(env)?;
+    let offered = claims::ready_ids(c, env, &ap, false)?;
+    const MEMBER: &str = "SELECT i.id, i.title, i.type, i.state, i.due, c.session, c.lease_until
+         FROM issues i LEFT JOIN claims c ON c.issue = i.id";
+    let rels = release_items(
+        c,
+        env,
+        &offered,
+        &format!(
+            "{MEMBER} WHERE i.type IN ('release', 'milestone') AND ?1 = ?1
+             ORDER BY i.due IS NULL, i.due, i.ord, i.id"
+        ),
+        "",
+    )?;
+    let mut out = Vec::new();
+    for mut r in rels {
+        let id = r["id"].as_str().unwrap_or_default().to_string();
+        let members = release_items(
+            c,
+            env,
+            &offered,
+            &format!(
+                "{MEMBER} WHERE (i.release = ?1 OR i.parent = ?1) AND i.id <> ?1 AND i.type <> 'review'
+                 ORDER BY i.type <> 'feature', i.state = 'dropped', i.priority, i.ord, i.id"
+            ),
+            &id,
+        )?;
+        if let Some(o) = r.as_object_mut() {
+            o.insert("items".to_string(), json!(members));
+        }
+        out.push(r);
+    }
+    let unplanned = release_items(
+        c,
+        env,
+        &offered,
+        &format!(
+            "{MEMBER} LEFT JOIN issues p ON p.id = i.parent
+             WHERE i.type = 'feature' AND i.release IS NULL AND ?1 = ?1
+               AND (p.id IS NULL OR p.type NOT IN ('release', 'milestone'))
+             ORDER BY i.state = 'dropped', i.priority, i.ord, i.id"
+        ),
+        "",
+    )?;
+    Ok(json!({"releases": out, "unplanned": unplanned}))
 }
 
 struct Request {
@@ -521,6 +630,7 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
         "/api/roadmap" => db::read(c, |c| crate::roadmap::roadmap_json(c, &env, false)),
         "/api/next" => next_view(c, &env),
         "/api/list" => db::read(c, |c| list_view(c, &env, q)),
+        "/api/releases" => db::read(c, |c| releases_view(c, &env)),
         "/api/stats" => {
             let since = query(q, "since")
                 .map(crate::time::parse_duration)

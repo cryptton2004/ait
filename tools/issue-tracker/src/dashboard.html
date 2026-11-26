@@ -89,6 +89,20 @@ aside { display: grid; gap: 16px; align-content: start; min-width: 0; }
 #listview .acts button { padding: 0 6px; margin-right: 4px; }
 #listview .pbar { width: 70px; height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 6px; }
 #listview .pbar span { display: block; height: 100%; background: var(--ok); }
+#relview { display: grid; gap: 16px; min-width: 0; }
+#relview .rel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+#relview .rel h2 { font-size: 15px; margin: 0; overflow-wrap: anywhere; }
+#relview .rel .meta { color: var(--muted); font-size: 13px; margin: 2px 0 8px; }
+#relview .rel .meta .late { color: var(--bad); font-weight: 600; }
+#relview table { width: 100%; border-collapse: collapse; font-size: 13px; }
+#relview th { text-align: left; color: var(--muted); font-weight: 600; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+#relview td { padding: 5px 6px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+#relview td.id { font: 12px ui-monospace, Consolas, monospace; white-space: nowrap; }
+#relview tr.item { cursor: pointer; }
+#relview tr.item:hover td { background: var(--chip); }
+#relview tr.dropped td { color: var(--muted); text-decoration: line-through; }
+#relview .pbar { width: 70px; height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 6px; }
+#relview .pbar span { display: block; height: 100%; background: var(--ok); }
 #bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px; margin-bottom: 8px; border: 1px solid var(--accent); border-radius: 6px; font-size: 13px; }
 #bulk select, #bulk input { width: auto; }
 .crit .ev { display: block; font-size: 12px; color: var(--muted); }
@@ -138,7 +152,7 @@ input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 
   <h1>ait board</h1>
   <span id="summary">loading…</span>
   <span id="nextup"></span>
-  <span class="views" role="tablist"><button id="vboard" class="on" type="button">Board</button><button id="vlist" type="button">List</button></span>
+  <span class="views" role="tablist"><button id="vboard" class="on" type="button">Board</button><button id="vlist" type="button">List</button><button id="vrel" type="button">Releases</button></span>
   <input id="search" type="search" placeholder="Search id, title, description, labels" aria-label="search issues">
   <button id="newbtn" class="primary" hidden>+ New issue</button>
   <span id="live"></span>
@@ -152,6 +166,7 @@ input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 
 <main id="main">
   <section id="columns" aria-label="Board columns"></section>
   <section id="listview" aria-label="All issues" hidden></section>
+  <section id="relview" aria-label="Releases" hidden></section>
   <aside>
     <div class="panel" id="detail" hidden></div>
   </aside>
@@ -722,6 +737,7 @@ function newDialog() {
     ac.placeholder = "one per line; all must be checked before review or done";
     ac.style.minHeight = "60px";
     const lb = field(g, "Labels", inp("", "comma separated, e.g. ui, bug (optional)"), false, "labels");
+    const du = field(g, "Expected date", dateInput(""), false, "due");
     const bd = field(g, "Description", el("textarea"), true, "body");
     bd.placeholder = "Markdown";
     pf.focus();
@@ -735,7 +751,7 @@ function newDialog() {
       const a = ["add", pf.value.trim(), ti.value.trim(), "--type", ty.value, "--priority", pr.value, "--state", st.value];
       const opt = (name, v) => { if (v.trim()) a.push("--" + name, v.trim()); };
       opt("reason", rs.value); opt("parent", pa.value); opt("release", rl.value); opt("needs", nd.value);
-      opt("agent", ag.value); opt("effort", ef.value); opt("criteria", ac.value); opt("labels", lb.value); opt("body", bd.value);
+      opt("agent", ag.value); opt("effort", ef.value); opt("criteria", ac.value); opt("labels", lb.value); opt("due", du.value); opt("body", bd.value);
       return a;
     };
   }, "Add issue", a => [a, "issue added", res => {
@@ -773,6 +789,8 @@ async function showDetail(id) {
     if (i.reviewer) box.append(el("span", "chip", "reviewer " + i.reviewer));
     if (i.parent) box.append(el("span", "chip", "parent " + i.parent));
     if (i.release) box.append(el("span", "chip", "release " + i.release));
+    if (i.due) box.append(el("span", "chip", "expected " + i.due));
+    for (const l of i.labels || []) box.append(el("span", "lbl", l));
     if (v.rollup) box.append(el("p", null, "Progress: " + rollupText(v.rollup)));
     if (i.summary) box.append(el("p", null, "Done: " + i.summary));
     else for (const b of v.blockers || []) box.append(el("p", null, "• " + b.message));
@@ -866,6 +884,7 @@ function editForm(box, i) {
     effort: field(g, "Effort", sel(EFFORTS, i.effort || "")),
     reviewer: field(g, "Reviewer", inp(i.reviewer)),
     labels: field(g, "Labels", inp((i.labels || []).join(", "), "comma separated")),
+    due: field(g, "Expected date", dateInput(i.due || "")),
     parent: field(g, "Parent", inp(i.parent)),
     release: field(g, "Release", inp(i.release)),
     size: field(g, "Size", inp(i.size)),
@@ -910,6 +929,12 @@ function editForm(box, i) {
   box.hidden = false;
 }
 
+function dateInput(v) {
+  const d = el("input");
+  d.type = "date";
+  d.value = v || "";
+  return d;
+}
 function normLabels(v) {
   return [...new Set(v.split(",").map(x => x.trim().toLowerCase()).filter(Boolean))].join(",");
 }
@@ -1079,10 +1104,68 @@ function setView(v) {
   view = v;
   document.getElementById("vboard").classList.toggle("on", v === "board");
   document.getElementById("vlist").classList.toggle("on", v === "list");
+  document.getElementById("vrel").classList.toggle("on", v === "releases");
   document.getElementById("columns").hidden = v !== "board";
   document.getElementById("listview").hidden = v !== "list";
+  document.getElementById("relview").hidden = v !== "releases";
   try { localStorage.setItem("ait-view", v); } catch (e) { /* private mode */ }
   if (v === "list") renderList();
+  if (v === "releases") renderReleases();
+}
+// ---------------------------------------------------------------- releases view
+function dueText(due) {
+  if (!due) return el("span", null, "no expected date");
+  const d = new Date(due + "T00:00:00");
+  const days = Math.round((d - new Date(new Date().toDateString())) / 86400000);
+  const s = el("span", null, "expected " + d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }));
+  return s.append(document.createTextNode(days === 0 ? " (today)" : days > 0 ? " (in " + days + "d)" : "")), s;
+}
+function relTable(items) {
+  const t = el("table");
+  const hr = el("tr");
+  for (const h of ["Id", "Title", "Type", "State", "Assignee", "Progress"]) hr.append(el("th", null, h));
+  t.append(hr);
+  for (const x of items) {
+    const tr = el("tr", "item" + (x.state === "dropped" ? " dropped" : ""));
+    tr.tabIndex = 0;
+    tr.append(el("td", "id", x.id), el("td", null, x.title), el("td", null, x.type), el("td", null, x.state),
+      el("td", null, x.assignee ? x.assignee + (x.claim_status === "stale" ? " (stale)" : "") : "–"));
+    const pc = el("td");
+    const bar = el("span", "pbar"), fill = el("span");
+    fill.style.width = Math.max(0, Math.min(100, x.percent)) + "%";
+    bar.append(fill);
+    pc.append(bar, document.createTextNode(x.percent + "%"));
+    tr.append(pc);
+    tr.addEventListener("click", () => showDetail(x.id));
+    tr.addEventListener("keydown", e => { if (e.key === "Enter") showDetail(x.id); });
+    t.append(tr);
+  }
+  if (!items.length) { const tr = el("tr"); const td = el("td", "w", "nothing planned into it yet"); td.colSpan = 6; tr.append(td); t.append(tr); }
+  return t;
+}
+async function renderReleases() {
+  const root = document.getElementById("relview");
+  let v;
+  try { v = await get("/api/releases"); } catch (e) { root.replaceChildren(el("div", "w", "could not load releases")); return; }
+  root.replaceChildren();
+  const today = new Date().toISOString().slice(0, 10);
+  for (const r of v.releases) {
+    const box = el("div", "rel");
+    const h = el("h2", null, r.title);
+    h.style.cursor = "pointer";
+    h.addEventListener("click", () => showDetail(r.id));
+    const meta = el("div", "meta");
+    meta.append(document.createTextNode(r.type + " · " + r.id + " · " + r.state + " · " + r.percent + "% · "), dueText(r.due));
+    if (r.due && r.due < today && !FINISHED.includes(r.state) && r.state !== "dropped") meta.append(document.createTextNode(" "), el("span", "late", "overdue"));
+    const live = r.items.filter(x => x.state !== "dropped").length, dropped = r.items.length - live;
+    meta.append(document.createTextNode(" · " + live + " item" + (live === 1 ? "" : "s") + (dropped ? ", " + dropped + " dropped" : "")));
+    box.append(h, meta, relTable(r.items));
+    root.append(box);
+  }
+  const un = el("div", "rel");
+  un.append(el("h2", null, "Not in a release yet"), el("div", "meta", "features without a release; set one with Edit → Release"), relTable(v.unplanned));
+  root.append(un);
+  if (!v.releases.length) root.prepend(el("div", "w", "No releases or milestones yet. Add one with + New issue, type release, and an expected date."));
 }
 // Search filters the board's cards and the list (id, title, description,
 // labels: every word must match).
@@ -1114,6 +1197,7 @@ async function refresh() {
   }
   renderColumns();
   if (view === "list" && !document.getElementById("listview").contains(document.activeElement)) renderList();
+  if (view === "releases") renderReleases();
   renderFeed(av.events);
   renderRoadmap(rv);
   const count = col => issues.filter(i => i.column === col).length;
@@ -1143,8 +1227,9 @@ async function poll() {
 document.getElementById("statsWindow").addEventListener("change", () => refresh());
 document.getElementById("vboard").addEventListener("click", () => setView("board"));
 document.getElementById("vlist").addEventListener("click", () => setView("list"));
+document.getElementById("vrel").addEventListener("click", () => setView("releases"));
 document.getElementById("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(applySearch, 250); });
-try { if (localStorage.getItem("ait-view") === "list") setView("list"); } catch (e) { /* private mode */ }
+try { const v = localStorage.getItem("ait-view"); if (v === "list" || v === "releases") setView(v); } catch (e) { /* private mode */ }
 if (WRITABLE) {
   const nb = document.getElementById("newbtn");
   nb.hidden = false;
