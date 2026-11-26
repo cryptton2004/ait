@@ -706,6 +706,10 @@ fn list_view_shows_everything_with_filters_and_paging() {
             "needs a Postgres index",
             "--criteria",
             "a\nb",
+            "--size",
+            "L",
+            "--priority",
+            "P1",
         ],
     );
     t.ok_at(None, T0 + 3 * MIN, &["add", "CORE", "Old idea"]);
@@ -757,6 +761,16 @@ fn list_view_shows_everything_with_filters_and_paging() {
     assert_eq!(by("CORE-1-00")["percent"], 100);
     assert_eq!(by("CORE-2-00")["percent"], 50);
     assert_eq!(by("CORE-2-00")["assignee"], "a1");
+    assert_eq!(
+        (
+            by("CORE-2-00")["priority"].as_str(),
+            by("CORE-2-00")["size"].as_str()
+        ),
+        (Some("P1"), Some("L"))
+    );
+    assert_eq!(by("CORE-1-00")["size"], serde_json::Value::Null);
+    assert_eq!(ids(&list("?sort=size&dir=desc"))[0], "CORE-2-00");
+    assert_eq!(ids(&list("?sort=priority&dir=asc"))[0], "CORE-2-00");
     assert_eq!(by("CORE-1-01")["labels"], serde_json::json!(["ui"]));
     assert_eq!(ids(&list("?state=dropped")), ["CORE-2-01"]);
     assert_eq!(ids(&list("?state=open")), ["CORE-2-00"]);

@@ -221,6 +221,7 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
         "priority" => "i.priority",
         "updated" => "i.updated_at",
         "assignee" => "c.session",
+        "size" => "lower(i.size)",
         _ => "i.created_at",
     };
     let dir = if query(q, "dir") == Some("asc") {
@@ -238,7 +239,7 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
         .max(1);
     let mut st = c.prepare(&format!(
         "SELECT i.id, i.title, i.state, i.type, i.priority, i.labels, i.created_at, i.updated_at,
-                i.parent, c.session, c.lease_until, lower(i.id || ' ' || i.title || ' ' || i.body || ' ' || i.labels)
+                i.parent, c.session, c.lease_until, lower(i.id || ' ' || i.title || ' ' || i.body || ' ' || i.labels), i.size
          FROM issues i LEFT JOIN claims c ON c.issue = i.id
          ORDER BY {sort} {dir}, i.id {dir}"
     ))?;
@@ -255,6 +256,7 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
         Option<String>,
         Option<i64>,
         String,
+        Option<String>,
     );
     let rows: Vec<Row> = st
         .query_map([], |r| {
@@ -271,6 +273,7 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
                 r.get(9)?,
                 r.get(10)?,
                 r.get(11)?,
+                r.get(12)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -307,6 +310,7 @@ fn list_view(c: &Connection, env: &Env, q: &str) -> Result<Value> {
             "state": r.2,
             "type": r.3,
             "priority": r.4,
+            "size": r.12,
             "labels": issues::label_list(&r.5),
             "created_at": crate::time::iso(r.6),
             "updated_at": crate::time::iso(r.7),

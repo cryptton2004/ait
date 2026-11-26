@@ -958,7 +958,7 @@ function evidenceDialog(i, x) {
 }
 
 // ---------------------------------------------------------------- list view
-const LIST_COLS = [["id", "Id"], ["state", "State"], ["title", "Title"], ["assignee", "Assignee"], ["created", "Created"], ["", "Progress"]];
+const LIST_COLS = [["id", "Id"], ["state", "State"], ["title", "Title"], ["priority", "Priority"], ["size", "Size"], ["assignee", "Assignee"], ["created", "Created"], ["", "Progress"]];
 function listQuery() {
   const s = listState, p = new URLSearchParams();
   p.set("sort", s.sort); p.set("dir", s.dir); p.set("limit", String(s.limit + 1));
@@ -1025,6 +1025,7 @@ async function renderList() {
     const tt = el("td", null, r.title);
     if (r.labels.length) { const lw = el("div"); for (const l of r.labels) lw.append(el("span", "lbl", l)); tt.append(lw); }
     tr.append(tt);
+    tr.append(el("td", null, r.priority), el("td", null, r.size || "–"));
     tr.append(el("td", null, r.assignee ? r.assignee + (r.claim_status === "stale" ? " (stale)" : "") : "–"));
     const cr = el("td", null, new Date(r.created_at).toLocaleDateString());
     cr.title = r.created_at;
@@ -1046,7 +1047,7 @@ async function renderList() {
     tr.append(acts);
     t.append(tr);
   }
-  if (!rows.length) { const tr = el("tr"); const td = el("td", "w", "no issues match"); td.colSpan = 9; tr.append(td); t.append(tr); }
+  if (!rows.length) { const tr = el("tr"); const td = el("td", "w", "no issues match"); td.colSpan = 11; tr.append(td); t.append(tr); }
   wrap.append(t);
   root.append(wrap);
   if (more) {
