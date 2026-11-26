@@ -414,3 +414,51 @@ fn read_only_dashboard_refuses_writes() {
     );
     assert_eq!(t.ok(None, &["list"])["count"], 1);
 }
+
+#[test]
+fn dashboard_columns_follow_the_flow() {
+    let t = T::new("serve_cols");
+    t.ok_at(None, T0, &["add", "CORE", "built"]);
+    t.ok_at(
+        None,
+        T0,
+        &[
+            "add",
+            "CORE",
+            "review",
+            "--type",
+            "review",
+            "--parent",
+            "CORE-1-00",
+        ],
+    );
+    t.ok_at(None, T0, &["add", "CORE", "server"]);
+    t.ok_at(None, T0, &["add", "CORE", "client", "--needs", "CORE-1-02"]);
+    t.ok_at(None, T0, &["add", "CORE", "idea", "--state", "idea"]);
+    t.ok_at(None, T0, &["add", "CORE", "old"]);
+    t.ok_at(Some("gone"), T0 - 120 * MIN, &["claim", "CORE-1-05"]);
+    let (_server, port) = start_server(&t, &[]);
+    let (_, v) = get(port, "/api/issues");
+    let v: serde_json::Value = serde_json::from_str(&v).unwrap();
+    let col = |id: &str| {
+        v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .map(|i| {
+                (
+                    i["column"].as_str().unwrap().to_string(),
+                    i["stale"] == true,
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(col("CORE-1-00"), ("ready".to_string(), false));
+    assert_eq!(col("CORE-1-01"), ("backlog".to_string(), false));
+    assert_eq!(col("CORE-1-02"), ("ready".to_string(), false));
+    assert_eq!(col("CORE-1-03"), ("waiting".to_string(), false));
+    assert_eq!(col("CORE-1-04"), ("backlog".to_string(), false));
+    // A stale claim stays in progress, flagged.
+    assert_eq!(col("CORE-1-05"), ("in_progress".to_string(), true));
+}

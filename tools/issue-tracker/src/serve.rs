@@ -461,14 +461,33 @@ fn run_args(base: &Env, args: Vec<String>) -> Result<Output> {
     crate::dispatch(&cmd, &conn, &env, &a)
 }
 
-/// Every issue with the board column it belongs to.
+/// Ids returned by a one-column query.
+fn id_set(c: &Connection, sql: &str) -> Result<std::collections::HashSet<String>> {
+    let mut st = c.prepare(sql)?;
+    let ids = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// Every issue with the board column it belongs to, left to right:
+/// backlog, ready, waiting, in_progress (stale claims flagged), in_review,
+/// done, released.
 fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
     let ap = claims::load_approvals(env)?;
     let offered: std::collections::HashSet<String> =
         claims::ready_ids(c, env, &ap, false)?.into_iter().collect();
+    let unmet = id_set(
+        c,
+        &format!(
+            "SELECT DISTINCT l.src FROM links l LEFT JOIN issues d ON d.id = l.dst
+             WHERE l.kind = 'needs' AND {}",
+            issues::need_unmet_sql()
+        ),
+    )?;
     let mut st = c.prepare(
         "SELECT i.id, i.title, i.state, i.reason, i.ord, i.done_at, c.session, c.generation, c.lease_until,
-                i.type, i.priority, i.agent
+                i.type, i.priority, i.agent, i.parent, i.released_at
          FROM issues i LEFT JOIN claims c ON c.issue = i.id
          WHERE i.state <> 'dropped'
          ORDER BY i.priority, i.ord, i.id",
@@ -479,19 +498,29 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
             let state: String = r.get(2)?;
             let session: Option<String> = r.get(6)?;
             let lease: Option<i64> = r.get(8)?;
+            let kind: String = r.get(9)?;
+            let parent: Option<String> = r.get(12)?;
             let live = session.is_some() && lease.is_some_and(|l| l > env.now);
-            let column = if state == "done" {
-                "done"
-            } else if live {
-                "in_progress"
-            } else if session.is_some() {
-                "stale"
-            } else if state == "blocked" || state == "decision" {
-                "waiting"
-            } else if offered.contains(&id) {
-                "ready"
-            } else {
-                "backlog"
+            let mut wait: Option<String> = None;
+            let column = match state.as_str() {
+                "released" => "released",
+                "done" => "done",
+                "in_review" => "in_review",
+                _ if session.is_some() => "in_progress",
+                "blocked" | "decision" => "waiting",
+                "ready" if offered.contains(&id) => "ready",
+                "ready" if unmet.contains(&id) => {
+                    wait = Some("waits for its needs".to_string());
+                    "waiting"
+                }
+                "ready" if kind == "review" => {
+                    wait = Some(format!(
+                        "starts when {} is in review",
+                        parent.as_deref().unwrap_or("its parent")
+                    ));
+                    "backlog"
+                }
+                _ => "backlog",
             };
             Ok(json!({
                 "id": id,
@@ -503,10 +532,14 @@ fn issues_view(c: &Connection, env: &Env) -> Result<Value> {
                 "session": session,
                 "generation": r.get::<_, Option<i64>>(7)?,
                 "lease_until": crate::time::iso_opt(lease),
+                "stale": session.is_some() && !live,
                 "column": column,
-                "type": r.get::<_, String>(9)?,
+                "wait": wait,
+                "type": kind,
                 "priority": r.get::<_, String>(10)?,
                 "agent": r.get::<_, Option<String>>(11)?,
+                "parent": parent,
+                "released_at": crate::time::iso_opt(r.get::<_, Option<i64>>(13)?),
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
