@@ -136,6 +136,8 @@ Work comes from `ait`, at `tools/ait/ait.exe`. Do not pick work any other way.
    - `ait handoff <ID> "done: ... remaining: ... branch: ... last commit: ..." --gen GEN`
    - `ait heartbeat` during long silent steps; every ait call renews your lease.
 5. Found new work: `ait add <PREFIX> "title" --discovered-from <ID> --body "..."`.
+   For a defect add `--type bug` (it works exactly like a task); tag issues
+   with `--labels a,b` when useful.
    If the reply lists `possible_duplicates`, check them; drop yours
    (`ait state <NEW> dropped --reason "duplicate of <ID>"`) if one matches.
 6. Finish:
@@ -234,7 +236,9 @@ JSON shapes that UI may rely on are in API.md.
 
 1. Run `tools\ait\ait.exe backup`.
 2. Replace `tools/ait/ait.exe` with the new build.
-3. The first call upgrades the database through numbered migrations. An older
+3. The first call upgrades the database through numbered migrations.
+   Re-copy the block in step 6 into AGENTS.md too: it changes when
+   features are added (`ait guide` always matches the installed build). An older
    `ait` refuses to open a newer database, so do not swap back without
    restoring the backup.
 

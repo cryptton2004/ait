@@ -79,8 +79,12 @@ ait for agents - the whole workflow
    nobody took it over).
    The issue's agent/agent_model/effort/reviewer fields say who should do it.
 5. Found new work?  ait add <PREFIX> \"title\" --discovered-from <ID> --body \"...\"
+   A defect: add --type bug (it works like a task). Tag with --labels a,b.
+   If the reply lists possible_duplicates, check them; if one matches, drop yours:
+   ait state <NEW> dropped --reason \"duplicate of <ID>\"
 6. Finish:       ait verify <ID> --gen GEN   (before merging)
-   Acceptance criteria: ait criteria <ID> --check N --gen GEN for each one.
+   Acceptance criteria: ait criteria <ID> --check N --gen GEN --evidence \"test, commit or link\"
+   for each one (ait criteria <ID> lists them); all must be checked first.
    Work that needs review: ait state <ID> in_review --gen GEN (gives the
    claim back; its --type review children then become claimable; it is done
    when they all are). Otherwise:
