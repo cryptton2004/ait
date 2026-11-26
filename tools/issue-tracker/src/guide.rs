@@ -44,7 +44,8 @@ Context
 
 Progress
   board [--limit N]    activity [--since 1h] [--after SEQ] [--issue ID] [--limit N]
-  serve [--port N]     local dashboard on http://127.0.0.1
+  serve [--port N] [--read-only]   local dashboard on http://127.0.0.1 (edits run
+                       the same commands, with the same checks)
 
 Data
   init    check [--git] [--repo dir]    backup    export [--out f]

@@ -201,3 +201,216 @@ fn serve_answers_dashboard_and_api_on_localhost_only() {
     }
     drop(server);
 }
+
+/// Starts `ait serve --port 0` (plus `extra`) and returns it with its port.
+fn start_server(t: &T, extra: &[&str]) -> (Server, u16) {
+    let mut c = t.cmd(None, &["serve", "--port", "0"]);
+    c.args(extra);
+    let mut server = Server(t.spawn(c));
+    let stdout = server.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("server did not start");
+    let port: u16 = line
+        .split("127.0.0.1:")
+        .nth(1)
+        .and_then(|r| r.split('/').next())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no port in {line:?}"));
+    (server, port)
+}
+
+fn page_token(port: u16) -> String {
+    let (_, page) = get(port, "/");
+    let marker = "name=\"ait-token\" content=\"";
+    let start = page.find(marker).expect("token meta") + marker.len();
+    page[start..].split('"').next().unwrap().to_string()
+}
+
+/// POST /api/run; `headers` are extra header lines. Returns (status, JSON).
+fn post(port: u16, headers: &str, args: &[&str]) -> (u16, serde_json::Value) {
+    let body = serde_json::json!({ "args": args }).to_string();
+    let (code, text) = http(
+        port,
+        &format!(
+            "POST /api/run HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n{headers}\r\n{body}",
+            body.len()
+        ),
+    );
+    (code, serde_json::from_str(&text).unwrap_or_default())
+}
+
+#[test]
+fn dashboard_writes_pass_the_cli_gates_and_only_from_its_own_page() {
+    let t = T::new("serve_write");
+    t.ok(None, &["add", "CORE", "first"]);
+    t.ok(None, &["add", "CORE", "second"]);
+    t.ok(Some("a1"), &["claim", "CORE-1-00"]);
+    let (_server, port) = start_server(&t, &[]);
+    let token = page_token(port);
+    assert_eq!(token.len(), 32, "{token}");
+    // The token appears once (in its meta tag); the page script must not
+    // contain the placeholder text the server replaces.
+    assert_eq!(get(port, "/").1.matches(&token).count(), 1);
+    let ok = format!("Content-Type: application/json\r\nX-Ait-Token: {token}\r\n");
+
+    // Guards: token, content type, origin, fetch site.
+    let (code, v) = post(
+        port,
+        "Content-Type: application/json\r\n",
+        &["add", "CORE", "x"],
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (403, Some("FORBIDDEN"))
+    );
+    let wrong = "Content-Type: application/json\r\nX-Ait-Token: 0000\r\n";
+    assert_eq!(post(port, wrong, &["add", "CORE", "x"]).0, 403);
+    let plain = format!("Content-Type: text/plain\r\nX-Ait-Token: {token}\r\n");
+    assert_eq!(post(port, &plain, &["add", "CORE", "x"]).0, 415);
+    let evil = format!("{ok}Origin: http://evil.example\r\n");
+    assert_eq!(post(port, &evil, &["add", "CORE", "x"]).0, 403);
+    let cross = format!("{ok}Sec-Fetch-Site: cross-site\r\n");
+    assert_eq!(post(port, &cross, &["add", "CORE", "x"]).0, 403);
+    let same = format!("{ok}Origin: http://127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\n");
+
+    // Only planning commands, and no options that pick files or identity.
+    for args in [
+        &["delete", "CORE-1-01"][..],
+        &["claim", "CORE-1-01"],
+        &["import", "x.jsonl"],
+        &["add", "CORE", "x", "--db", "other.db"],
+        &["add", "CORE", "x", "--as", "a1"],
+        &["add", "CORE", "x", "--body-file", "Cargo.toml"],
+    ] {
+        let (code, v) = post(port, &same, args);
+        assert_eq!(
+            (code, v["error"]["code"].as_str()),
+            (400, Some("USAGE")),
+            "{args:?}"
+        );
+    }
+
+    // add, with the same checks as `ait add`.
+    let (code, v) = post(
+        port,
+        &same,
+        &[
+            "add",
+            "CORE",
+            "from the dashboard",
+            "--priority",
+            "P1",
+            "--type",
+            "feature",
+        ],
+    );
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["result"]["issue"]["id"], "CORE-1-02");
+    let (code, v) = post(port, &same, &["add", "CORE", "bad", "--priority", "P9"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (400, Some("INVALID_INPUT"))
+    );
+    let (code, v) = post(port, &same, &["add", "CORE", "x", "--state", "blocked"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (400, Some("INVALID_INPUT"))
+    );
+
+    // edit and state of an agent's claimed issue need --force, as on the CLI.
+    let (code, v) = post(port, &same, &["edit", "CORE-1-00", "--priority", "P0"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (409, Some("NOT_CLAIMANT"))
+    );
+    let (code, v) = post(
+        port,
+        &same,
+        &["edit", "CORE-1-00", "--priority", "P0", "--force"],
+    );
+    assert_eq!(code, 200, "{v}");
+    let (code, v) = post(
+        port,
+        &same,
+        &["edit", "CORE-1-01", "--title", "x", "--version", "1"],
+    );
+    assert_eq!(code, 200, "{v}");
+    let (code, v) = post(
+        port,
+        &same,
+        &["edit", "CORE-1-01", "--title", "y", "--version", "1"],
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (409, Some("VERSION_CONFLICT"))
+    );
+
+    // done: summary required; without a claim it is refused unless --force.
+    let (code, _) = post(port, &same, &["done", "CORE-1-01"]);
+    assert_eq!(code, 400);
+    let (code, v) = post(port, &same, &["done", "CORE-1-01", "--summary", "ok"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (409, Some("NOT_CLAIMED"))
+    );
+    let (code, v) = post(
+        port,
+        &same,
+        &["done", "CORE-1-01", "--summary", "ok", "--force"],
+    );
+    assert_eq!(code, 200, "{v}");
+    let (code, v) = post(port, &same, &["state", "CORE-1-01", "ready"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (409, Some("ALREADY_DONE"))
+    );
+
+    // Rank: move changes what `next` offers first.
+    t.ok(None, &["add", "CORE", "third"]);
+    t.ok(None, &["add", "CORE", "fourth"]);
+    let (_, nv) = get(port, "/api/next");
+    let nv: serde_json::Value = serde_json::from_str(&nv).unwrap();
+    assert_eq!(nv["build"][0]["id"], "CORE-1-03");
+    let (code, _) = post(port, &same, &["move", "CORE-1-04", "--top"]);
+    assert_eq!(code, 200);
+    let (_, nv) = get(port, "/api/next");
+    let nv: serde_json::Value = serde_json::from_str(&nv).unwrap();
+    assert_eq!(nv["build"][0]["id"], "CORE-1-04");
+    let (code, _) = post(port, &same, &["note", "CORE-1-04", "looked at it"]);
+    assert_eq!(code, 200);
+
+    // Dashboard writes are recorded as the "dashboard" session.
+    let v = t.ok(None, &["activity", "--issue", "CORE-1-04"]);
+    let sessions: Vec<&str> = v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["session"].as_str())
+        .collect();
+    assert!(sessions.contains(&"dashboard"), "{v}");
+}
+
+#[test]
+fn read_only_dashboard_refuses_writes() {
+    let t = T::new("serve_ro");
+    t.ok(None, &["add", "CORE", "first"]);
+    let (_server, port) = start_server(&t, &["--read-only"]);
+    assert_eq!(page_token(port), "");
+    let (code, v) = post(
+        port,
+        "Content-Type: application/json\r\nX-Ait-Token: \r\n",
+        &["add", "CORE", "x"],
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (403, Some("READ_ONLY"))
+    );
+    assert_eq!(t.ok(None, &["list"])["count"], 1);
+}

@@ -123,8 +123,13 @@ fn run(raw: Vec<String>) -> Result<Output> {
         // and `ait backup` surface problems.
         let _ = backup::auto(&conn, &env);
     }
-    let c = &conn;
-    match cmd.as_str() {
+    dispatch(&cmd, &conn, &env, &a)
+}
+
+/// Runs one command. Also used by the dashboard, so its writes pass the
+/// same checks as the command line.
+pub fn dispatch(cmd: &str, c: &rusqlite::Connection, env: &db::Env, a: &Args) -> Result<Output> {
+    match cmd {
         "init" => {
             a.expect(&[], 0)?;
             let p = env.db_path.display().to_string();
@@ -133,32 +138,32 @@ fn run(raw: Vec<String>) -> Result<Output> {
                 format!("database ready: {p} (schema {})", db::schema_version()),
             ))
         }
-        "add" | "new" => issues::cmd_add(c, &env, &a),
-        "edit" => issues::cmd_edit(c, &env, &a),
-        "state" => issues::cmd_state(c, &env, &a),
-        "delete" => issues::cmd_delete(c, &env, &a),
-        "move" => issues::cmd_move(c, &env, &a),
-        "link" => issues::cmd_link(c, &env, &a, false),
-        "unlink" => issues::cmd_link(c, &env, &a, true),
-        "show" => issues::cmd_show(c, &env, &a),
-        "list" | "ls" => issues::cmd_list(c, &env, &a),
-        "next" => claims::cmd_next(c, &env, &a),
-        "roadmap" => roadmap::cmd_roadmap(c, &env, &a),
-        "claim" => claims::cmd_claim(c, &env, &a),
-        "release" => claims::cmd_release(c, &env, &a),
-        "done" => claims::cmd_done(c, &env, &a),
-        "heartbeat" => claims::cmd_heartbeat(c, &env, &a),
-        "verify" => claims::cmd_verify(c, &env, &a),
-        "note" => notes::cmd_note(c, &env, &a),
-        "handoff" => notes::cmd_handoff(c, &env, &a),
-        "brief" => notes::cmd_brief(c, &env, &a),
-        "board" => board::cmd_board(c, &env, &a),
-        "activity" => board::cmd_activity(c, &env, &a),
-        "check" => check::cmd_check(c, &env, &a),
-        "backup" => backup::cmd_backup(c, &env, &a),
-        "export" => exchange::cmd_export(c, &env, &a),
-        "import" => exchange::cmd_import(c, &env, &a),
-        "serve" => serve::cmd_serve(c, &env, &a),
+        "add" | "new" => issues::cmd_add(c, env, a),
+        "edit" => issues::cmd_edit(c, env, a),
+        "state" => issues::cmd_state(c, env, a),
+        "delete" => issues::cmd_delete(c, env, a),
+        "move" => issues::cmd_move(c, env, a),
+        "link" => issues::cmd_link(c, env, a, false),
+        "unlink" => issues::cmd_link(c, env, a, true),
+        "show" => issues::cmd_show(c, env, a),
+        "list" | "ls" => issues::cmd_list(c, env, a),
+        "next" => claims::cmd_next(c, env, a),
+        "roadmap" => roadmap::cmd_roadmap(c, env, a),
+        "claim" => claims::cmd_claim(c, env, a),
+        "release" => claims::cmd_release(c, env, a),
+        "done" => claims::cmd_done(c, env, a),
+        "heartbeat" => claims::cmd_heartbeat(c, env, a),
+        "verify" => claims::cmd_verify(c, env, a),
+        "note" => notes::cmd_note(c, env, a),
+        "handoff" => notes::cmd_handoff(c, env, a),
+        "brief" => notes::cmd_brief(c, env, a),
+        "board" => board::cmd_board(c, env, a),
+        "activity" => board::cmd_activity(c, env, a),
+        "check" => check::cmd_check(c, env, a),
+        "backup" => backup::cmd_backup(c, env, a),
+        "export" => exchange::cmd_export(c, env, a),
+        "import" => exchange::cmd_import(c, env, a),
+        "serve" => serve::cmd_serve(c, env, a),
         other => Err(AitError::usage(format!(
             "unknown command '{other}' (run `ait help`)"
         ))),

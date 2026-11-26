@@ -22,6 +22,7 @@ const BOOL_FLAGS: &[&str] = &[
     "frame",
     "issues",
     "tree",
+    "read-only",
     "help",
 ];
 

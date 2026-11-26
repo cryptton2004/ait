@@ -1,6 +1,13 @@
-//! `ait serve`: a read-only local dashboard on 127.0.0.1, written on plain
-//! `std::net` (no web framework). The page polls `/api/head` and reloads its
-//! data when the newest event number changes.
+//! `ait serve`: a local dashboard on 127.0.0.1, written on plain `std::net`
+//! (no web framework). The page polls `/api/head` and reloads its data when
+//! the newest event number changes.
+//!
+//! Writes go through `POST /api/run`, which runs the same command code as the
+//! command line (so the same checks apply), for a short list of planning
+//! commands only. A write must carry the per-start token embedded in the page
+//! (`X-Ait-Token`), a JSON content type, and, when the browser sends them, a
+//! same-origin `Origin` / `Sec-Fetch-Site`. Other web pages cannot read the
+//! token, so they cannot send writes. `--read-only` turns writes off.
 
 use crate::args::Args;
 use crate::board;
@@ -13,12 +20,61 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::time::Duration;
 
 const PAGE: &str = include_str!("dashboard.html");
 
+/// The session name dashboard writes are recorded under.
+pub const DASHBOARD_SESSION: &str = "dashboard";
+
+/// Commands the dashboard may run. Everything else (claims, delete, import,
+/// serve, backup...) stays on the command line.
+const WRITE_COMMANDS: &[&str] = &[
+    "add", "edit", "state", "move", "done", "note", "link", "unlink",
+];
+
+/// Options a dashboard request may not pass (they would pick another
+/// database, config or identity, or read and write files on this PC).
+const FORBIDDEN_OPTS: &[&str] = &[
+    "db",
+    "config",
+    "as",
+    "help",
+    "body-file",
+    "text-file",
+    "from-file",
+    "out",
+];
+
+const MAX_BODY: usize = 2 * 1024 * 1024;
+
+struct Server {
+    port: u16,
+    token: String,
+    writable: bool,
+}
+
+/// A random per-start token (std's randomly seeded hasher; no extra crate).
+fn new_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut out = String::new();
+    for i in 0..2_u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(i);
+        h.write_u128(nanos);
+        h.write_u32(std::process::id());
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
+}
+
 pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["port"], 0)?;
+    a.expect(&["port", "read-only"], 0)?;
     let port = match a.opt_i64("port")? {
         Some(p) => u16::try_from(p).map_err(|_| AitError::usage("--port must be 0..65535"))?,
         None => env.cfg.port,
@@ -30,20 +86,31 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         )
     })?;
     let actual = listener.local_addr()?.port();
+    let server = Arc::new(Server {
+        port: actual,
+        token: new_token(),
+        writable: !a.flag("read-only"),
+    });
     {
         let mut out = std::io::stdout().lock();
+        let mode = if server.writable {
+            "editable"
+        } else {
+            "read-only"
+        };
         let _ = writeln!(
             out,
-            "ait dashboard: http://127.0.0.1:{actual}/  (Ctrl+C to stop)"
+            "ait dashboard: http://127.0.0.1:{actual}/  ({mode}; Ctrl+C to stop)"
         );
         let _ = out.flush();
     }
-    // One short-lived thread (with its own read-only use of the DB) per
-    // connection, so an idle browser connection cannot block the others.
+    // One short-lived thread (with its own connection) per request, so an
+    // idle browser connection cannot block the others.
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let cfg = env.cfg.clone();
         let db_path = env.db_path.clone();
+        let server = Arc::clone(&server);
         std::thread::spawn(move || {
             let base = Env {
                 now: 0,
@@ -51,7 +118,7 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 cfg,
                 db_path,
             };
-            let _ = handle(stream, &base, actual);
+            let _ = handle(stream, &base, &server);
         });
     }
     Ok(Output::new(json!({"stopped": true}), ""))
@@ -59,7 +126,7 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
 
 fn respond(s: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
         body.len()
     );
     s.write_all(head.as_bytes())?;
@@ -76,6 +143,14 @@ fn json_resp(s: &mut TcpStream, status: &str, v: &Value) -> std::io::Result<()> 
     )
 }
 
+fn deny(s: &mut TcpStream, status: &str, code: &str, message: &str) -> std::io::Result<()> {
+    json_resp(
+        s,
+        status,
+        &json!({"error": {"code": code, "message": message, "retryable": false}}),
+    )
+}
+
 fn query<'a>(q: &'a str, key: &str) -> Option<&'a str> {
     q.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;
@@ -83,52 +158,109 @@ fn query<'a>(q: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-fn handle(mut s: TcpStream, base: &Env, port: u16) -> std::io::Result<()> {
-    s.set_read_timeout(Some(Duration::from_secs(5)))?;
-    s.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut buf = Vec::with_capacity(2048);
-    let mut chunk = [0u8; 2048];
-    loop {
+struct Request {
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Request {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Reads one request: the head (at most 16 KB) and a body of
+/// `Content-Length` bytes (at most 2 MB). `Err` means a bad request.
+fn read_request(s: &mut TcpStream) -> std::io::Result<std::result::Result<Request, String>> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 8192];
+    let head_end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if buf.len() > 16_384 {
+            return Ok(Err("request head too large".to_string()));
+        }
         let n = s.read(&mut chunk)?;
         if n == 0 {
-            break;
+            return Ok(Err("incomplete request".to_string()));
         }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 16_384 {
-            break;
-        }
-    }
-    let req = String::from_utf8_lossy(&buf);
-    let mut lines = req.split("\r\n");
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+    let mut lines = head.split("\r\n");
     let first = lines.next().unwrap_or("");
     let mut parts = first.split(' ');
-    let method = parts.next().unwrap_or("");
-    let target = parts.next().unwrap_or("/");
-    // Only answer requests addressed to this local server (blocks DNS rebinding).
-    let host = lines
-        .find_map(|l| {
+    let method = parts.next().unwrap_or("").to_string();
+    let target = parts.next().unwrap_or("/").to_string();
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.trim()
-                .eq_ignore_ascii_case("host")
-                .then(|| v.trim().to_string())
+            Some((k.trim().to_string(), v.trim().to_string()))
         })
-        .unwrap_or_default();
-    let allowed = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
-    if !allowed.contains(&host) {
-        return json_resp(
-            &mut s,
-            "403 Forbidden",
-            &json!({"error": {"code": "FORBIDDEN", "message": "bad Host header"}}),
-        );
+        .collect();
+    let len = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .map(|(_, v)| v.parse::<usize>())
+        .transpose()
+        .map_err(|_| std::io::Error::other("bad Content-Length"))?
+        .unwrap_or(0);
+    if len > MAX_BODY {
+        return Ok(Err("request body too large".to_string()));
     }
-    if method != "GET" {
-        return json_resp(
+    let mut body: Vec<u8> = buf[head_end + 4..].to_vec();
+    while body.len() < len {
+        let n = s.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(Err("incomplete request body".to_string()));
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(len);
+    Ok(Ok(Request {
+        method,
+        target,
+        headers,
+        body,
+    }))
+}
+
+fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
+    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    s.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let req = match read_request(&mut s) {
+        Ok(Ok(r)) => r,
+        Ok(Err(m)) => return deny(&mut s, "400 Bad Request", "BAD_REQUEST", &m),
+        Err(e) => return deny(&mut s, "400 Bad Request", "BAD_REQUEST", &e.to_string()),
+    };
+    let port = srv.port;
+    // Only answer requests addressed to this local server (blocks DNS rebinding).
+    let host = req.header("host").unwrap_or("");
+    let allowed = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    if !allowed.iter().any(|a| a == host) {
+        return deny(&mut s, "403 Forbidden", "FORBIDDEN", "bad Host header");
+    }
+    let (path, q) = req
+        .target
+        .split_once('?')
+        .unwrap_or((req.target.as_str(), ""));
+    if req.method == "POST" && path == "/api/run" {
+        return run_write(&mut s, base, srv, &req);
+    }
+    if req.method != "GET" {
+        return deny(
             &mut s,
             "405 Method Not Allowed",
-            &json!({"error": {"code": "METHOD", "message": "read-only server"}}),
+            "METHOD",
+            "only GET, and POST /api/run",
         );
     }
-    let (path, q) = target.split_once('?').unwrap_or((target, ""));
     let env = Env {
         now: crate::time::now_ms().unwrap_or(base.now),
         session: None,
@@ -136,11 +268,17 @@ fn handle(mut s: TcpStream, base: &Env, port: u16) -> std::io::Result<()> {
         db_path: base.db_path.clone(),
     };
     if path == "/" || path == "/index.html" {
+        let page = PAGE
+            .replace("__AIT_TOKEN__", if srv.writable { &srv.token } else { "" })
+            .replace(
+                "__AIT_WRITABLE__",
+                if srv.writable { "true" } else { "false" },
+            );
         return respond(
             &mut s,
             "200 OK",
             "text/html; charset=utf-8",
-            PAGE.as_bytes(),
+            page.as_bytes(),
         );
     }
     let conn = match db::open(&env.db_path) {
@@ -153,6 +291,7 @@ fn handle(mut s: TcpStream, base: &Env, port: u16) -> std::io::Result<()> {
         "/api/board" => db::read(c, |c| board::board_json(c, &env, 50)),
         "/api/issues" => db::read(c, |c| issues_view(c, &env)),
         "/api/roadmap" => db::read(c, |c| crate::roadmap::roadmap_json(c, &env, false)),
+        "/api/next" => next_view(c, &env),
         "/api/activity" => {
             let after = query(q, "after").and_then(|v| v.parse().ok());
             let limit = query(q, "limit")
@@ -175,6 +314,151 @@ fn handle(mut s: TcpStream, base: &Env, port: u16) -> std::io::Result<()> {
         Err(e) if e.code == "NOT_FOUND" => json_resp(&mut s, "404 Not Found", &e.to_json()),
         Err(e) => json_resp(&mut s, "500 Internal Server Error", &e.to_json()),
     }
+}
+
+/// What `ait next` would offer, best first, plus what `next --frame` would.
+fn next_view(c: &Connection, env: &Env) -> Result<Value> {
+    let ap = claims::load_approvals(env)?;
+    db::read(c, |c| {
+        let pick = |frame: bool| -> Result<Vec<Value>> {
+            let p = claims::Pick {
+                frame,
+                ..Default::default()
+            };
+            claims::candidates(c, env, &ap, &p)?
+                .iter()
+                .take(10)
+                .map(|id| {
+                    let mut v = issues::get_full(c, &env.cfg, id)?;
+                    if let Some(o) = v.as_object_mut() {
+                        o.remove("body");
+                    }
+                    Ok(v)
+                })
+                .collect()
+        };
+        Ok(json!({"build": pick(false)?, "frame": pick(true)?}))
+    })
+}
+
+fn status_for(exit: i32) -> &'static str {
+    match exit {
+        2 => "400 Bad Request",
+        3 => "404 Not Found",
+        4 | 6 => "409 Conflict",
+        5 => "503 Service Unavailable",
+        _ => "500 Internal Server Error",
+    }
+}
+
+/// `POST /api/run` with `{"args": ["edit", "CORE-1-00", "--priority", "P1"]}`.
+fn run_write(s: &mut TcpStream, base: &Env, srv: &Server, req: &Request) -> std::io::Result<()> {
+    if !srv.writable {
+        return deny(
+            s,
+            "403 Forbidden",
+            "READ_ONLY",
+            "the dashboard was started with --read-only",
+        );
+    }
+    let port = srv.port;
+    let origins = [
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+    ];
+    if let Some(o) = req.header("origin")
+        && !origins.iter().any(|a| a == o)
+    {
+        return deny(
+            s,
+            "403 Forbidden",
+            "FORBIDDEN",
+            "cross-site request refused",
+        );
+    }
+    if let Some(site) = req.header("sec-fetch-site")
+        && site != "same-origin"
+    {
+        return deny(
+            s,
+            "403 Forbidden",
+            "FORBIDDEN",
+            "cross-site request refused",
+        );
+    }
+    if req.header("x-ait-token") != Some(srv.token.as_str()) {
+        return deny(
+            s,
+            "403 Forbidden",
+            "FORBIDDEN",
+            "missing or wrong dashboard token",
+        );
+    }
+    let ctype = req.header("content-type").unwrap_or("");
+    if !ctype.to_ascii_lowercase().starts_with("application/json") {
+        return deny(
+            s,
+            "415 Unsupported Media Type",
+            "BAD_REQUEST",
+            "send application/json",
+        );
+    }
+    let args: Vec<String> = match serde_json::from_slice::<Value>(&req.body) {
+        Ok(v) => match v.get("args").and_then(Value::as_array) {
+            Some(a) if a.iter().all(Value::is_string) => a
+                .iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect(),
+            _ => {
+                return deny(
+                    s,
+                    "400 Bad Request",
+                    "BAD_REQUEST",
+                    "body must be {\"args\": [\"command\", ...]}",
+                );
+            }
+        },
+        Err(e) => return deny(s, "400 Bad Request", "BAD_REQUEST", &e.to_string()),
+    };
+    let result = run_args(base, args);
+    match result {
+        Ok(out) => json_resp(s, "200 OK", &json!({"ok": true, "result": out.json})),
+        Err(e) => {
+            let mut v = e.to_json();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("exit".to_string(), json!(e.exit_code()));
+            }
+            json_resp(s, status_for(e.exit_code()), &v)
+        }
+    }
+}
+
+fn run_args(base: &Env, args: Vec<String>) -> Result<Output> {
+    let mut a = Args::parse(args)?;
+    for o in FORBIDDEN_OPTS {
+        if a.opt(o).is_some() || a.flag(o) {
+            return Err(AitError::usage(format!(
+                "--{o} is not allowed from the dashboard"
+            )));
+        }
+    }
+    let Some(cmd) = a.shift() else {
+        return Err(AitError::usage("no command"));
+    };
+    if !WRITE_COMMANDS.contains(&cmd.as_str()) {
+        return Err(AitError::usage(format!(
+            "'{cmd}' is not available from the dashboard (allowed: {})",
+            WRITE_COMMANDS.join(", ")
+        )));
+    }
+    let env = Env {
+        now: crate::time::now_ms()?,
+        session: Some(DASHBOARD_SESSION.to_string()),
+        cfg: base.cfg.clone(),
+        db_path: base.db_path.clone(),
+    };
+    let conn = db::open(&env.db_path)?;
+    crate::dispatch(&cmd, &conn, &env, &a)
 }
 
 /// Every issue with the board column it belongs to.

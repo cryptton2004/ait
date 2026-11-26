@@ -96,7 +96,7 @@ Every command accepts `--json` (machine output), `--as <session>`,
 | `brief <ID> [--out f]` | A self-contained Markdown brief for a cloud session. Use `--out` rather than `>` in PowerShell, which would re-encode the file |
 | `board [--limit N]` | One screen: in progress, stale, waiting (decision or blocked), ready, recently done |
 | `activity` | Event feed: `--since 1h`, `--after SEQ`, `--issue ID`, `--limit N` |
-| `serve [--port N]` | Read-only dashboard at `http://127.0.0.1:7777/`. Stop it with Ctrl+C |
+| `serve [--port N] [--read-only]` | Dashboard at `http://127.0.0.1:7777/` (see below). Stop it with Ctrl+C |
 | `check [--git] [--repo dir]` | Consistency check (ids, states, types, priorities, cycles, dangling links, duplicate legacy names). `--git` reads the repository from `repo =` (or `--repo`), not the current folder, and compares first-parent merge commits on `main` whose last paragraph carries `Issue-ID: <id>` lines: `DONE_NOT_MERGED` (done, not merged, not in `git_baseline`) and `MERGED_NOT_DONE` |
 | `backup` | Backup now. A daily backup also happens automatically |
 | `export [--out f]` / `import <f>` | Readable JSONL dump and restore (into an empty database). Import validates everything first and writes nothing if anything is wrong; `IMPORT_INVALID` lists every problem in `error.details.problems` |
@@ -121,6 +121,32 @@ prefix (`--prefix-for`, default `task=TASK,feature=FEAT,milestone=MS,release=REL
 every call by the claimant renews it. Each new claim of an issue gets the next
 generation number. Writes that carry an old `--gen` are refused, so an agent
 that times out and wakes up later cannot overwrite its successor's work.
+
+## Dashboard
+
+`ait serve` shows the board live (it reloads within about 2 seconds of any change):
+columns, what `ait next` and `ait next --frame` would offer (the top card is
+marked NEXT), the roadmap, the activity feed, and each issue's details.
+
+From the dashboard you can also add issues, edit any field (including the
+description), change the state, close an issue as done, add notes, and rank
+issues by dragging a card onto another (cards sort by priority, then rank, so
+dropping onto a card of another priority also takes that priority). Dragging a
+card onto a column changes its state and asks for what the command needs (a
+reason for Waiting, a summary for Done).
+
+Every change runs the same `ait` command the CLI would (`add`, `edit`,
+`state`, `move`, `done`, `note`, `link`, `unlink`), recorded as the session
+`dashboard`, so the same checks apply. When the CLI would ask for `--force`
+(an agent's claim, closing without a claim, reopening done work), the
+dashboard shows the refusal and an explicit "Override (--force)" button.
+Claims, deletes, imports and backups stay on the command line.
+
+Safety: the server listens on 127.0.0.1 only and refuses other Host names.
+Each start creates a random token that only the dashboard page carries;
+writes without it, from another site (`Origin`, `Sec-Fetch-Site`), or not
+sent as JSON are refused, and options that read files or switch database or
+identity are refused. `ait serve --read-only` turns writes off.
 
 ## Errors and exit codes
 
