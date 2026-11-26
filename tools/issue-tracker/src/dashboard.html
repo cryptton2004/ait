@@ -281,7 +281,7 @@ function card(i) {
   if (WRITABLE) {
     c.addEventListener("dragover", e => { if (dragId && dragId !== i.id && i.column !== "done") { e.preventDefault(); e.stopPropagation(); c.classList.add("drop"); } });
     c.addEventListener("dragleave", () => c.classList.remove("drop"));
-    c.addEventListener("drop", e => { e.preventDefault(); e.stopPropagation(); c.classList.remove("drop"); const id = dragId; dragId = null; if (id && id !== i.id && i.column !== "done") rankBefore(id, i); });
+    c.addEventListener("drop", e => { e.preventDefault(); e.stopPropagation(); c.classList.remove("drop"); const id = dragId; dragId = null; if (!id || id === i.id || i.column === "done") return; const from = issues.find(x => x.id === id); if (from && from.column !== i.column && i.column === "in_progress") dropOnColumn(id, i.column); else rankBefore(id, i); });
   }
   return c;
 }
@@ -349,7 +349,7 @@ function renderColumns() {
     if (!items.length) cards.append(el("div", "empty", "nothing here"));
     for (const i of items) cards.append(card(i));
     col.append(h, cards);
-    if (WRITABLE && key !== "in_progress") {
+    if (WRITABLE) {
       col.addEventListener("dragover", e => { if (dragId) { e.preventDefault(); col.classList.add("over"); } });
       col.addEventListener("dragleave", e => { if (!col.contains(e.relatedTarget)) col.classList.remove("over"); });
       col.addEventListener("drop", e => { e.preventDefault(); col.classList.remove("over"); const id = dragId; dragId = null; if (id) dropOnColumn(id, key); });
