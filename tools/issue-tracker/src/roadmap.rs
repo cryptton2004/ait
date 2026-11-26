@@ -69,7 +69,16 @@ pub fn rollup_with(c: &Connection, env: &Env, offered: &[String], id: &str) -> R
         .iter()
         .find(|o| rows.iter().any(|r| &r.0 == *o))
         .cloned();
-    let percent = if total > 0 { done * 100 / total } else { 0 };
+    // A container with no members is as far along as its own state: a done
+    // or released empty feature is 100%, not 0%.
+    let own: String = c.query_row("SELECT state FROM issues WHERE id = ?1", [id], |r| r.get(0))?;
+    let percent = if total > 0 {
+        done * 100 / total
+    } else if issues::FINISHED.contains(&own.as_str()) {
+        100
+    } else {
+        0
+    };
     Ok(json!({
         "total": total,
         "done": done,

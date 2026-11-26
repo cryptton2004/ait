@@ -679,3 +679,42 @@ fn features_open_groups_and_children_number_under_them() {
         "CORE-9-00"
     );
 }
+
+/// A released feature shows 100% on the roadmap, with or without members.
+#[test]
+fn released_features_show_complete_on_the_roadmap() {
+    let t = T::new("rmreleased");
+    t.ok(None, &["add", "CORE", "empty feature", "--type", "feature"]);
+    t.ok(None, &["add", "CORE", "full feature", "--type", "feature"]);
+    t.ok(None, &["add", "CORE", "its task", "--parent", "CORE-2-00"]);
+    let pct = |id: &str| {
+        let v = t.ok(None, &["roadmap", "--all"]);
+        v["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .map(|f| f["rollup"]["percent"].clone())
+            .unwrap()
+    };
+    assert_eq!(pct("CORE-1-00"), 0);
+    t.ok(
+        None,
+        &[
+            "done",
+            "CORE-1-00",
+            "--summary",
+            "nothing to build",
+            "--force",
+        ],
+    );
+    assert_eq!(pct("CORE-1-00"), 100);
+    t.ok(None, &["ship", "CORE-1-00", "--force"]);
+    assert_eq!(pct("CORE-1-00"), 100);
+    t.ok(
+        None,
+        &["done", "CORE-2-01", "--summary", "built", "--force"],
+    );
+    t.ok(None, &["ship", "CORE-2-00", "--force"]);
+    assert_eq!(pct("CORE-2-00"), 100);
+}
