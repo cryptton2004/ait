@@ -132,6 +132,18 @@ Work comes from `ait`, at `tools/ait/ait.exe`. Do not pick work any other way.
    - `ait heartbeat` during long silent steps; every ait call renews your lease.
 5. Found new work: `ait add <PREFIX> "title" --discovered-from <ID> --body "..."`.
 6. Finish:
+   - Check each acceptance criterion as you meet it:
+     `ait criteria <ID> --check N --gen GEN` (`ait criteria <ID>` lists them).
+     All must be checked before review or done.
+   - If the issue has review children (`--type review`), submit it with
+     `ait state <ID> in_review --gen GEN` instead of `done`. That gives the
+     claim back; reviewers then claim the reviews, and the issue is closed
+     once they are all done.
+   - Reviewers: note what you found on the review issue. If the work fails,
+     release the review and send the parent back with
+     `ait state <parent> ready --reason "review: <what is wrong>"`.
+   - `WIP_LIMIT` (exit 4, retryable) means the column or your tier is full:
+     finish or release something first, or try again later.
    - `ait verify <ID> --gen GEN` right before merging.
    - Merge into main with `git merge --no-ff`. The last paragraph of the merge
      message must be `Issue-ID: <ID>`.
@@ -183,14 +195,34 @@ The last command shows the issue as `done` with the summary. Leave the issue
 in place: deleted ids are retired and never reused, so deleting it gains
 nothing.
 
-## 9. The dashboard (for the owner)
+## 9. Workflow settings (optional)
+
+Add to `default.cfg` if wanted:
+
+```
+# Work-in-progress limits (new claims or submissions wait when full).
+wip.in_progress = 6
+wip.in_review = 4
+wip.agent.deep = 1
+```
+
+Releasing: when every item of a release, milestone or feature is done and
+its merges are on `origin/main`, the owner runs `ait ship <ID>` (or drags it
+to Released on the dashboard). Containers move to in review and done by
+themselves as their children finish.
+
+## 10. The dashboard (for the owner)
 
 Run `tools\ait\ait.exe serve` and open `http://127.0.0.1:7777/`. Agents do not
 need it. Its edits run the same commands with the same checks, and
 `serve --read-only` gives a view-only board. Stop it with Ctrl+C. See the
 "Dashboard" section in README.md.
 
-## 10. Upgrading `ait`
+To use it from another local UI (a factory UI on, say, port 5173), add
+`allowed_origins = http://localhost:5173` to `default.cfg`. The endpoints and
+JSON shapes that UI may rely on are in API.md.
+
+## 11. Upgrading `ait`
 
 1. Run `tools\ait\ait.exe backup`.
 2. Replace `tools/ait/ait.exe` with the new build.
@@ -201,14 +233,15 @@ need it. Its edits run the same commands with the same checks, and
 ## Command summary
 
 **Agents:** `next [--claim] [--agent tier] [--frame]`, `claim`, `show`,
-`note`, `handoff`, `heartbeat`, `verify`, `add --discovered-from`, `done`,
-`release`, `guide`.
+`note`, `handoff`, `heartbeat`, `verify`, `criteria --check`,
+`state <ID> in_review`, `add --discovered-from`, `done`, `release`, `guide`.
 
 **Owner and coordinator:** `add`, `edit`, `state`, `move` (rank), `link`,
 `delete`, `list` (filters and `--tree`), `roadmap`, `board`, `activity`,
-`next --explain`, `check [--git]`, `backup`, `export`, `import`, `serve`.
+`stats`, `ship`, `criteria`, `link --until`, `next --explain`,
+`check [--git]`, `backup`, `export`, `import`, `serve`.
 `--force` overrides a claim or a done-gate.
 
 Every command takes `--json`. With `--json`, errors are printed as
 `{"error":{"code","message","retryable"}}`. The exit codes are listed in
-README.md.
+README.md; every JSON shape is in API.md.

@@ -11,18 +11,22 @@ USAGE: ait <command> [args] [--json] [--as <session>] [--db <file>] [--config <f
 Planning
   add <PREFIX|PREFIX-N|ID> \"title\" [--body t|--body-file f] [--after ID] [--state s]
       [--reason r] [--size s] [--spec s] [--parent ID] [--legacy old-id]
-      [--needs ID,ID] [--discovered-from ID] [--type task|feature|milestone|release]
+      [--needs ID[:state],ID] [--discovered-from ID] [--criteria \"one per line\"]
+      [--type task|feature|milestone|release|review]
       [--priority P0..P4] [--agent tier] [--effort low..max] [--reviewer r]
       [--release ID]
   edit <ID> [same fields as add] [--version N] [--gen N] [--force]
-  state <ID> <idea|planned|ready|blocked|decision|dropped> [--reason r] [--gen N] [--force]
+  state <ID> <idea|planned|ready|blocked|decision|dropped|in_review> [--reason r] [--gen N] [--force]
   move <ID> --before ID | --after ID | --top | --bottom
-  link <ID> needs|relates|discovered-from <ID>      unlink <ID> <kind> <ID>
+  link <ID> needs|blocked-by|relates|discovered-from <ID> [--until planned|ready|in_review|done|released]
+  unlink <ID> <kind> <ID>
+  criteria <ID> [--add \"text\" | --check N | --uncheck N | --remove N] [--gen N] [--force]
   delete <ID> [--force]
   show <ID> [--notes N]      list [--state a,b] [--prefix P] [--ready] [--claimed]
       [--stale] [--all] [--limit N] [--type t] [--priority P0,P1] [--agent tier]
       [--parent ID] [--release ID] [--tree]
   roadmap [--all]            releases, milestones and features with progress
+  ship <ID> [--ref r] [--force]   mark a release/epic and its done items released
 
 Claims (need AIT_SESSION or --as)
   next [--prefix P] [--limit N] [--agent tier] [--priority P0,P1] [--type t]
@@ -44,6 +48,7 @@ Context
 
 Progress
   board [--limit N]    activity [--since 1h] [--after SEQ] [--issue ID] [--limit N]
+  stats [--since 7d]   time in each column, cycle time, lead time
   serve [--port N] [--read-only]   local dashboard on http://127.0.0.1 (edits run
                        the same commands, with the same checks)
 
@@ -74,6 +79,10 @@ ait for agents - the whole workflow
    The issue's agent/agent_model/effort/reviewer fields say who should do it.
 5. Found new work?  ait add <PREFIX> \"title\" --discovered-from <ID> --body \"...\"
 6. Finish:       ait verify <ID> --gen GEN   (before merging)
+   Acceptance criteria: ait criteria <ID> --check N --gen GEN for each one.
+   Work that needs review: ait state <ID> in_review --gen GEN (gives the
+   claim back; its --type review children then become claimable; it is done
+   when they all are). Otherwise:
                  ait done <ID> --summary \"what was delivered\" --gen GEN --ran \"model, effort\"
    Or give it back: ait release <ID> --gen GEN
 7. STALE_GENERATION or NOT_CLAIMANT means someone took the issue over after your

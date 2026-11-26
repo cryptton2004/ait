@@ -80,14 +80,16 @@ Every command accepts `--json` (machine output), `--as <session>`,
 
 | Command | What it does |
 |---|---|
-| `add <PREFIX\|PREFIX-N\|ID> "title"` | New issue. `CORE` takes the next number in the newest group, `CORE-2` the next number in group 2, `CORE-1-05` exactly that id. Options: `--body`/`--body-file` (Markdown), `--after ID` (next free number after it, placed after it in the order), `--state` (default `ready`), `--reason`, `--size`, `--spec`, `--parent`, `--legacy`, `--needs A,B`, `--discovered-from ID`, `--type task\|feature\|milestone\|release` (default task), `--priority P0..P4` (default P2), `--agent <tier>`, `--effort low\|medium\|high\|xhigh\|max`, `--reviewer <name>`, `--release <release or milestone id>` |
+| `add <PREFIX\|PREFIX-N\|ID> "title"` | New issue. `CORE` takes the next number in the newest group, `CORE-2` the next number in group 2, `CORE-1-05` exactly that id. Options: `--body`/`--body-file` (Markdown), `--after ID` (next free number after it, placed after it in the order), `--state` (default `ready`), `--reason`, `--size`, `--spec`, `--parent`, `--legacy`, `--needs A,B` (or `A:in_review` to wait only until A reaches that state), `--discovered-from ID`, `--criteria "one per line"` (acceptance criteria), `--type task\|feature\|milestone\|release\|review` (default task; a review needs `--parent`), `--priority P0..P4` (default P2), `--agent <tier>`, `--effort low\|medium\|high\|xhigh\|max`, `--reviewer <name>`, `--release <release or milestone id>` |
 | `edit <ID>` | Change any field `add` takes. `--version N` refuses the change if someone else changed the issue first. A claimed issue can only be edited by its claimant (`--gen N`), or with `--force` |
-| `state <ID> <state> [--reason r]` | `idea`, `planned`, `ready`, `blocked`, `decision`, `dropped`. The last three need a reason. Use `done` to close an issue. A done issue is only reopened with `--force`; a claimed issue only changes by its claimant or with `--force` |
+| `state <ID> <state> [--reason r]` | `idea`, `planned`, `ready`, `blocked`, `decision`, `dropped`, `in_review`. `blocked`, `decision` and `dropped` need a reason. `in_review` submits the work for review (all acceptance criteria checked, gives the claim back). Use `done` to close an issue and `ship` to release it. Finished work is only reopened with `--force`; a claimed issue only changes by its claimant or with `--force` |
 | `move <ID> --before/--after ID \| --top \| --bottom` | Change the order (the order is what `next` follows) |
-| `link <ID> needs\|relates\|discovered-from <ID>` / `unlink …` | Links. `needs` blocks readiness, and cycles are refused |
+| `link <ID> needs\|blocked-by\|relates\|discovered-from <ID> [--until state]` / `unlink …` | Links. `needs` (alias `blocked-by`) keeps the issue waiting until the other one is done, or reaches the `--until` state (`planned`, `ready`, `in_review`, `done`, `released`). Cycles are refused |
+| `criteria <ID>` | Acceptance criteria. No option lists them; `--add "text"` (one per line), `--check N`, `--uncheck N`, `--remove N`. Same claim rules as `edit` |
 | `delete <ID> [--force]` | Deletes an issue. Refused if it is claimed or other issues need it, unless `--force`. The id is retired and never reused |
 | `show <ID> [--notes N]` | Issue, links, claim, readiness with reasons, latest handoff, recent notes |
 | `list` | `--state a,b`, `--prefix P`, `--ready`, `--claimed`, `--stale`, `--all` (include done and dropped), `--limit N`, `--type`, `--priority P0,P1`, `--agent tier`, `--parent ID`, `--release ID`, `--tree` (indented by parent) |
+| `ship <ID> [--ref r] [--force]` | Release a release, milestone or feature: every member must be done or dropped, and every done task merged into `main` (with the `Issue-ID` trailer, or in `git_baseline`) and, when `origin/main` exists, pushed. Marks the container and its done members `released`. `--force` skips the git checks |
 | `roadmap [--all]` | Releases, milestones and features, each with done/total, percent, in progress, the next offered member, open decisions and blocked members. A container's members are its children (`parent`) and everything whose `release` is it, recursively |
 | `next` | What would be offered, by priority then order (`--prefix`, `--limit`, `--agent`, `--priority`, `--type`; tasks only unless `--type` is given). `--claim` claims the top one. `--take-stale` also takes over expired claims. `--frame` offers `idea`/`planned` issues with a frame approval instead. `--explain ID` says why an issue isn't offered and names the approval cause (`FRAME_ONLY`, `EXPIRED`, `EXCLUDED`, `NOT_STARTED`, `NOT_APPROVED`, `NO_APPROVALS_FILE`) |
 | `claim <ID> [--take]` | Claim one issue. `--take` takes over a claim whose lease expired, and returns the previous handoff |
@@ -98,6 +100,7 @@ Every command accepts `--json` (machine output), `--as <session>`,
 | `note <ID> "text"` / `--text-file f` | Append a note. Notes are never edited |
 | `handoff <ID> ["text" \| --from-file f]` | Save a "how to resume" snapshot. Old handoffs stay in history. With no text, shows the latest |
 | `brief <ID> [--out f]` | A self-contained Markdown brief for a cloud session. Use `--out` rather than `>` in PowerShell, which would re-encode the file |
+| `stats [--since 7d]` | Flow stats from the event log: per column how many issues passed and how long they stayed (median, p90), how many sit there now and the oldest; cycle time (first claim to done) and lead time (added to done) |
 | `board [--limit N]` | One screen: in progress, stale, waiting (decision or blocked), ready, recently done |
 | `activity` | Event feed: `--since 1h`, `--after SEQ`, `--issue ID`, `--limit N` |
 | `serve [--port N] [--read-only]` | Dashboard at `http://127.0.0.1:7777/` (see below). Stop it with Ctrl+C |
@@ -107,9 +110,33 @@ Every command accepts `--json` (machine output), `--as <session>`,
 | `import --issues <f> [--prefix-for feature=EPIC,…]` | Load an inventory, one JSON issue per line (see below), into an empty database |
 | `init`, `guide`, `help`, `version` | |
 
-**Readiness:** `next` offers an issue only when it is a task in state `ready`,
-every `needs` issue is `done`, a build approval covers it (if approvals are
-used), and nobody holds a claim on it. A `dropped` prerequisite keeps blocking.
+**Readiness:** `next` offers an issue only when it is a task (or a review
+whose parent is in review) in state `ready`, every `needs` issue has reached
+its target state (`done` by default), a build approval covers it (if
+approvals are used), its WIP limits have room, and nobody holds a claim on
+it. A `dropped` prerequisite keeps blocking.
+
+**Flow:** the board columns are, left to right, backlog (idea, planned),
+ready, waiting (blocked, decision, or unmet needs), in progress (claimed),
+in review, done and released.
+
+- *Reviews:* add review issues with `--type review --parent ID` (for example
+  code, security, legal). They become claimable only once the parent is
+  `in_review`. The parent can be closed only when all its reviews are done;
+  a reviewer who finds problems notes them on the review, releases it, and
+  moves the parent back with `ait state <parent> ready --reason "review: ..."`.
+- *Acceptance criteria:* every criterion must be checked before an issue goes
+  to `in_review` or `done` (`--force` overrides, as the owner).
+- *Containers roll up:* a feature, milestone or release moves to `in_review`
+  by itself when all its children are in review or finished, and to `done`
+  when all are finished (and its own reviews and criteria are done). It goes
+  back to `planned` if a child is reopened. `state` and `done` report this in
+  `rollup`.
+- *Release:* once everything is done and merged, `ait ship <ID>` marks it
+  `released`.
+- *WIP limits:* `wip.in_progress`, `wip.in_review` and `wip.agent.<tier>` in
+  `default.cfg`. A full column refuses new claims (or submissions) with
+  `WIP_LIMIT`, which is retryable; `next` skips tiers that are full.
 
 **Inventory format (`import --issues`):** one JSON object per line. Fields:
 `title` (required), `id` or `legacy`, `type` (or `kind`), `body`, `state`
@@ -140,10 +167,14 @@ card onto a column changes its state and asks for what the command needs (a
 reason for Waiting, a summary for Done).
 
 Every change runs the same `ait` command the CLI would (`add`, `edit`,
-`state`, `move`, `done`, `note`, `link`, `unlink`), recorded as the session
+`state`, `move`, `done`, `note`, `link`, `unlink`, `ship`, `criteria`), recorded as the session
 `dashboard`, so the same checks apply. When the CLI would ask for `--force`
 (an agent's claim, closing without a claim, reopening done work), the
 dashboard shows the refusal and an explicit "Override (--force)" button.
+Cards show stale claims with a badge (and a filter), column headers show
+WIP "live / limit", issue details have the acceptance checklist, and the
+Flow panel shows `ait stats` for 7 days, 30 days or all time. Dropping a card
+on In review submits it; dropping it on Released runs `ship`.
 Claims, deletes, imports and backups stay on the command line.
 
 Safety: the server listens on 127.0.0.1 only and refuses other Host names.
@@ -151,6 +182,12 @@ Each start creates a random token that only the dashboard page carries;
 writes without it, from another site (`Origin`, `Sec-Fetch-Site`), or not
 sent as JSON are refused, and options that read files or switch database or
 identity are refused. `ait serve --read-only` turns writes off.
+
+**Using it from another local UI:** list that page's origin in
+`allowed_origins` (for example `http://localhost:5173`). It may then call the
+API with CORS, get the token from `/api/token`, and show the dashboard in an
+iframe; every other origin stays refused. The endpoints and every `--json`
+shape are a versioned contract in [API.md](API.md).
 
 ## Errors and exit codes
 
@@ -164,7 +201,7 @@ Without `--json`, a one-line message goes to stderr.
 | 1 | internal / database / disk error | `DB_ERROR`, `IO_ERROR`, `INTERNAL` |
 | 2 | bad input or setup | `USAGE`, `INVALID_ID`, `INVALID_INPUT`, `INVALID_STATE`, `UNKNOWN_PREFIX`, `CONFIG`, `NO_SESSION`, `NO_DB`, `IMPORT_INVALID` |
 | 3 | not found | `NOT_FOUND` |
-| 4 | conflict | `ALREADY_CLAIMED`, `CLAIM_STALE`, `STALE_GENERATION`, `NOT_CLAIMANT`, `NOT_CLAIMED`, `VERSION_CONFLICT`, `CYCLE`, `IN_USE`, `ID_TAKEN`, `GROUP_FULL`, `ALREADY_DONE`, `NOT_EMPTY` |
+| 4 | conflict | `ALREADY_CLAIMED`, `CLAIM_STALE`, `STALE_GENERATION`, `NOT_CLAIMANT`, `NOT_CLAIMED`, `VERSION_CONFLICT`, `CYCLE`, `IN_USE`, `ID_TAKEN`, `GROUP_FULL`, `ALREADY_DONE`, `NOT_EMPTY`, `NOT_SHIPPABLE`, `REVIEWS_OPEN`, `REVIEW_NOT_STARTED`, `WIP_LIMIT` (retryable), `CRITERIA_OPEN` |
 | 5 | busy, retry shortly | `BUSY` |
 | 6 | nothing ready to claim | `NO_WORK` |
 | 7 | `check` found problems | |
@@ -219,3 +256,4 @@ can expire leases without sleeping.
 | `src/serve.rs`, `src/dashboard.html` | local dashboard |
 | `src/config.rs`, `src/approvals.rs` | default.cfg and approvals |
 | `src/roadmap.rs` | rollups and `ait roadmap` |
+| `src/roadmap.rs` (cont.), `src/criteria.rs`, `src/stats.rs` | `ship` and auto-rollup, acceptance criteria, flow stats |
