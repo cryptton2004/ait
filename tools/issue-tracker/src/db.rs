@@ -119,6 +119,14 @@ pub fn open(path: &Path) -> Result<Connection> {
         }
     }
     conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF;")?;
+    // Each `ait` call is a short-lived process. Checkpointing (and deleting)
+    // the WAL on every close costs ~100 ms of disk syncs on Windows; leave it
+    // to SQLite's automatic checkpoints instead. The data stays safe in the
+    // WAL file next to the database.
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )?;
     migrate(&conn)?;
     Ok(conn)
 }
@@ -230,12 +238,27 @@ pub fn event(
     Ok(c.last_insert_rowid())
 }
 
+/// How often a session's activity renews its leases.
+pub const RENEW_EVERY_MS: i64 = 60_000;
+
 /// Records the session and renews every lease it holds ("any call by the
 /// claimant renews it").
 pub fn touch_session(conn: &Connection, env: &Env) -> Result<()> {
     let Some(s) = env.session.as_deref() else {
         return Ok(());
     };
+    // Skip the write when this session was seen less than a minute ago:
+    // leases are renewed at most once a minute, which keeps reads fast.
+    let last: Option<i64> = {
+        use rusqlite::OptionalExtension;
+        conn.query_row("SELECT last_seen FROM sessions WHERE name = ?1", [s], |r| {
+            r.get(0)
+        })
+        .optional()?
+    };
+    if last.is_some_and(|l| env.now >= l && env.now - l < RENEW_EVERY_MS) {
+        return Ok(());
+    }
     let machine = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok();
