@@ -17,6 +17,10 @@ It solves three problems, in this order:
 The design is in `DesignIteration6.md` at the repository root. This README
 describes what is actually built.
 
+**Installing `ait` in another repository?** Follow [INSTALL.md](INSTALL.md):
+where to copy the files, what to put in `default.cfg`, the block to add to
+that repo's AGENTS.md, and a smoke test.
+
 ## Build
 
 ```
