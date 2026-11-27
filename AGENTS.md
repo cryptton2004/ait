@@ -60,7 +60,7 @@ Plus, once they exist: `ait check` on the test fixtures, and the migration round
 - Stable toolchain, edition 2024. `#![forbid(unsafe_code)]` in every crate.
 - No `unwrap()`, `expect()` or `panic!` in non-test code: return errors. Errors surface to users as the structured JSON error format from the design (`code`, `message`, `retryable`) with a meaningful exit code.
 - Keep it simple and synchronous. No async runtime unless the owner approves one.
-- **Dependencies: only the approved crates** — `rusqlite` (feature `bundled`), `serde`, `serde_json` (approved by the owner on 2026-11-25). Adding, upgrading or changing features of any crate needs the owner's explicit approval. Keep `Cargo.lock` committed; vendor dependencies under `vendor/` once approved.
+- **Dependencies: only the approved crates** — `rusqlite` (feature `bundled`), `serde`, `serde_json` (approved by the owner on 2026-11-25). Adding, upgrading or changing features of any crate needs the owner's explicit approval. Versions are pinned by `Cargo.lock`, which stays committed. A local `vendor/` folder with `.cargo/config.toml` (offline builds) is allowed as a cache but is never committed; when you change a dependency with the owner's approval, refresh it with `cargo vendor`.
 - Git is driven through the `git` command line, not a git library.
 - SQLite: WAL mode, `busy_timeout`, every write in `BEGIN IMMEDIATE`; schema changes only through numbered migrations.
 

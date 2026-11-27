@@ -31,7 +31,7 @@ jobs:
           rustup default stable
           rustc --version
 
-      # Dependencies come from vendor/ (see .cargo/config.toml): no network.
+      # Dependencies are downloaded at the versions pinned in Cargo.lock.
       - name: Format
         run: cargo fmt --all -- --check
 

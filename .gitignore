@@ -8,5 +8,8 @@
 /DesignIteration*.md
 /design/
 /summary-for-board-session.md
+# Local offline build cache (cargo vendor): versions are pinned by Cargo.lock.
+/vendor/
+/.cargo/
 # Scratch folders anywhere in the repo.
 tmp/

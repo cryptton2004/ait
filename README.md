@@ -165,8 +165,8 @@ cargo build --release
 ```
 
 The result is `target/release/ait.exe`. Dependencies (`rusqlite` with bundled
-SQLite, `serde`, `serde_json`) are vendored in `vendor/` and the build runs
-offline. Every change must pass the quality gate, which CI also runs:
+SQLite, `serde`, `serde_json`) are pinned by `Cargo.lock`; the first build
+downloads them, like `npm install`. Every change must pass the quality gate, which CI also runs:
 
 ```
 cargo fmt --all -- --check

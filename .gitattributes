@@ -1,2 +1,3 @@
-# Vendored crates are checksummed byte for byte: never convert line endings.
+# A local vendor/ cache (git-ignored) is checksummed byte for byte: never
+# convert its line endings if it is ever added.
 vendor/** -text

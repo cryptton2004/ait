@@ -28,7 +28,9 @@ copy target\release\ait.exe tools\issue-tracker\ait.exe
 ```
 
 You need Rust (stable, MSVC) and the Visual Studio C++ build tools. The
-libraries are vendored in `vendor/`, so the build works offline.
+libraries are pinned by `Cargo.lock` and downloaded by the first build. To
+build offline later, run `cargo vendor` once and follow what it prints
+(the `vendor/` folder and `.cargo/config.toml` are git-ignored).
 `ait.exe` is git-ignored: build it, don't commit it.
 
 ## Setup
