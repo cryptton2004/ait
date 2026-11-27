@@ -1,16 +1,25 @@
-# Publishes a GitHub Release when a version tag is pushed:
-#   git tag v0.1.0 && git push origin v0.1.0
-# The tag must match the version in Cargo.toml.
-# Users then download the zip from the repository's "Releases" page
+# Publishes a GitHub Release with the ait zip. Two ways to start it:
+#   1. Actions tab -> Release -> "Run workflow" (on main). The release is
+#      named after the version in Cargo.toml (v0.1.0) and the tag is created
+#      on the commit that was built.
+#   2. Push a version tag yourself: git tag v0.1.0 && git push origin v0.1.0
+#      (the tag must match the version in Cargo.toml).
+# A version can be released once: bump `version` in Cargo.toml for the next.
+# Users download the zip from the repository's "Releases" page
 # (…/releases/latest always points at the newest one).
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -27,13 +36,20 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
-      - name: Tag matches the crate version
+      - name: Work out the version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           want="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          if [ "$want" != "$GITHUB_REF_NAME" ]; then
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$want" != "$GITHUB_REF_NAME" ]; then
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $want" >&2
             exit 1
           fi
+          if gh release view "$want" > /dev/null 2>&1; then
+            echo "Release $want already exists: bump version in Cargo.toml first" >&2
+            exit 1
+          fi
+          echo "VERSION=$want" >> "$GITHUB_ENV"
 
       - name: Quality gate
         run: |
@@ -46,7 +62,7 @@ jobs:
 
       - name: Package
         run: |
-          name="ait-$GITHUB_REF_NAME-windows-x64"
+          name="ait-$VERSION-windows-x64"
           # Same layout as the repository, so the links between the docs work.
           mkdir -p "dist/$name/docs" "dist/$name/examples"
           cp target/release/ait.exe default.cfg approvals.example.json \
@@ -62,5 +78,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 \
-            --title "ait $GITHUB_REF_NAME" --generate-notes
+          # --target creates the tag on the built commit when it does not exist yet.
+          gh release create "$VERSION" dist/*.zip dist/*.sha256 \
+            --target "$GITHUB_SHA" --title "ait $VERSION" --generate-notes

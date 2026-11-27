@@ -178,8 +178,11 @@ The code is written and maintained by AI agents under the rules in
 [AGENTS.md](AGENTS.md): no `unsafe`, no panics in normal code, tests for
 every command and fix, and no new dependencies without approval.
 
-Releases are published by pushing a version tag that matches
-`Cargo.toml` (`git tag v0.1.0 && git push origin v0.1.0`).
+To publish a release, open the Actions tab, pick **Release** and click
+**Run workflow** on `main`: it runs the gate, builds, and publishes
+`v<version from Cargo.toml>` with the zip. Pushing a matching tag
+(`git tag v0.1.0 && git push origin v0.1.0`) does the same. Bump `version`
+in `Cargo.toml` before the next release.
 
 ## License
 
