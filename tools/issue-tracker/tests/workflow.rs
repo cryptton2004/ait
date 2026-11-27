@@ -637,6 +637,21 @@ fn stats_measure_time_in_each_column() {
     assert_eq!(col("done", "now"), 1);
     assert_eq!(v["cycle_time"]["median_hours"], 3.0);
     assert_eq!(v["lead_time"]["median_hours"], 4.0);
+    // Duration buckets: 0-15m, 15-30m, 30-60m, 1-2h, 2-4h, 4h+.
+    let b = |x: &Value| {
+        x.as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(b(&v["bucket_minutes"]), [15, 30, 60, 120, 240]);
+    assert_eq!(b(&col("ready", "buckets")), [0, 0, 0, 1, 0, 0]);
+    assert_eq!(b(&col("in_progress", "buckets")), [0, 0, 0, 0, 1, 0]);
+    assert_eq!(b(&col("ready", "now_buckets")), [0, 0, 0, 0, 0, 1]);
+    assert_eq!(b(&col("waiting", "buckets")), [0, 0, 0, 0, 0, 0]);
+    assert_eq!(b(&v["cycle_time"]["buckets"]), [0, 0, 0, 0, 1, 0]);
+    assert_eq!(b(&v["lead_time"]["buckets"]), [0, 0, 0, 0, 0, 1]);
     // --since keeps only time that ended inside the window.
     let v = t.ok_at(None, T0 + 300 * MIN, &["stats", "--since", "90m"]);
     assert_eq!(v["columns"]["ready"]["count"], 0);

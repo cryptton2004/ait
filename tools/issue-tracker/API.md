@@ -183,9 +183,13 @@ policy (see below), and close the connection.
 null), `stale` (bool: claimed but the lease ran out), `wait` (string or
 null: why it is in `waiting`, why a backlog review has not started, or why a card in `ready` is not offered to agents).
 
-**Stats:** `{"since", "columns": {column: {"count", "avg_hours",
-"median_hours", "p90_hours", "now", "now_avg_hours", "now_max_hours"}},
-"cycle_time": {...}, "lead_time": {...}}`. `count`/`avg`/`median`/`p90`
+**Stats:** `{"since", "bucket_minutes", "columns": {column: {"count", "avg_hours",
+"median_hours", "p90_hours", "buckets", "now", "now_avg_hours", "now_max_hours",
+"now_buckets"}}, "cycle_time": {...}, "lead_time": {...}}`.
+`buckets` / `now_buckets` count durations per bucket; `bucket_minutes`
+(`[15, 30, 60, 120, 240]`) are the upper edges, so there are six buckets:
+0-15m, 15-30m, 30-60m, 1-2h, 2-4h, 4h+. `cycle_time` and `lead_time` carry
+`buckets` too. `count`/`avg`/`median`/`p90`
 describe finished stays in the column; `now*` describe issues sitting in it
 now. Cycle time = first claim to done; lead time = added to done. Hours are
 rounded to 0.1; `null` when there is no data.
@@ -278,4 +282,5 @@ frame-ancestors 'self' <origins>`); without the setting every response says
   dashboard may run `claim` and `release` (all additive).
   Then (2026-11-27, additive, schema 7): issue `labels` and `due`, criterion
   `evidence`, `possible_duplicates` on `add`, `/api/list`, `/api/releases`,
-  `/api/events`, and the dashboard may run `delete`.
+  `/api/events`, and the dashboard may run `delete`. Then (2026-11-27,
+  additive): type `bug`, `size` in `/api/list`, duration `buckets` in stats.

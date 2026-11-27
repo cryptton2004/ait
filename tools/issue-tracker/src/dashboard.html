@@ -29,7 +29,18 @@ header h1 { font-size: 17px; margin: 0; }
 #panels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 16px 16px 0; align-items: start; }
 @media (max-width: 1200px) { #panels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 700px) { #panels { grid-template-columns: 1fr; } }
-#panels .panel { max-height: 360px; display: flex; flex-direction: column; }
+#panels .panel { height: 360px; display: flex; flex-direction: column; }
+@media (max-width: 700px) { #panels .panel { height: auto; max-height: 360px; } }
+.dist { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; font-size: 12px; }
+.dist .bar { display: flex; height: 16px; border-radius: 3px; overflow: hidden; background: var(--chip); }
+.dist .bar span { display: block; height: 100%; font-size: 10px; line-height: 16px; text-align: center; color: #fff; overflow: hidden; white-space: nowrap; }
+.dist .bar span.dk { color: #1a1a1a; }
+.dist .none { color: var(--muted); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--muted); margin: 0 0 8px; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 3px; vertical-align: -1px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; vertical-align: middle; }
+.seg button { border: 0; border-radius: 0; padding: 1px 7px; font-size: 11px; background: transparent; color: var(--muted); }
+.seg button.on { background: var(--accent); color: #fff; }
 #panels .panel > :not(h2) { min-height: 0; overflow-y: auto; }
 main { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 16px; }
 main.withdetail { grid-template-columns: 1fr 380px; }
@@ -161,7 +172,7 @@ input.bad, select.bad, textarea.bad { border-color: var(--bad); box-shadow: 0 0 
 </header>
 <section id="panels" aria-label="Overview">
   <div class="panel" id="nextlist"><h2>Next up</h2><div id="nextbody" class="w">loading…</div></div>
-  <div class="panel" id="statsPanel"><h2>Flow: time in each column <select id="statsWindow" aria-label="time window" style="width:auto;font-size:12px"><option value="7d">7 days</option><option value="30d" selected>30 days</option><option value="">all time</option></select></h2><div id="stats" class="w">loading…</div></div>
+  <div class="panel" id="statsPanel"><h2>Flow: time in each column <select id="statsWindow" aria-label="time window" style="width:auto;font-size:12px"><option value="7d">7 days</option><option value="30d" selected>30 days</option><option value="">all time</option></select> <span class="seg" id="statsMode"><button type="button" data-m="table">Table</button><button type="button" data-m="chart">Chart</button></span></h2><div id="stats" class="w">loading…</div></div>
   <div class="panel" id="roadmapPanel"><h2>Roadmap</h2><div id="roadmap"></div></div>
   <div class="panel"><h2>Activity <span class="w" id="feedcount"></span></h2><ul id="feed"></ul></div>
 </section>
@@ -474,10 +485,75 @@ function hours(h) {
   if (h === null || h === undefined) return "–";
   return h >= 48 ? (h / 24).toFixed(1) + "d" : h.toFixed(1) + "h";
 }
+// Duration buckets from /api/stats (bucket_minutes are the upper edges).
+const BUCKET_COLORS = ["#36a347", "#8ccb00", "#e6b000", "#f07400", "#e44343", "#8e3ae8"];
+let statsMode = (() => { try { return localStorage.getItem("ait-stats-mode") || "table"; } catch (e) { return "table"; } })();
+let statsMore = "passed", lastStats = null;
+// Labels such as 0–15m, 15–30m, 30–60m, 1–2h, 2–4h, 4h+.
+function bucketLabels(edges) {
+  // Up to an hour in minutes, above it in hours; the lower end takes the
+  // upper end's unit when it divides evenly (1–2h), else its own (30m–1h).
+  const unit = m => m <= 60 ? [m, "m"] : [m / 60, "h"];
+  const out = [];
+  let lo = 0;
+  for (const e of edges) {
+    const [hv, hu] = unit(e);
+    const same = hu === "m" || lo % 60 === 0;
+    const [lv, lu] = same ? [hu === "m" ? lo : lo / 60, ""] : unit(lo);
+    out.push(lv + lu + "–" + hv + hu);
+    lo = e;
+  }
+  out.push(lo >= 60 && lo % 60 === 0 ? lo / 60 + "h+" : lo + "m+");
+  return out;
+}
+function distBar(counts, labels, what) {
+  const total = counts.reduce((a, b) => a + b, 0);
+  const bar = el("div", "bar");
+  if (!total) { const n = el("span", "none", "no data"); n.style.background = "transparent"; n.style.color = "inherit"; n.style.width = "100%"; bar.append(n); return bar; }
+  counts.forEach((n, k) => {
+    if (!n) return;
+    const pct = n * 100 / total;
+    const s = el("span", k === 1 || k === 2 ? "dk" : null, pct >= 14 ? Math.round(pct) + "%" : "");
+    s.style.width = pct + "%";
+    s.style.background = BUCKET_COLORS[k];
+    s.title = labels[k] + ": " + n + " " + what + " (" + Math.round(pct) + "%)";
+    bar.append(s);
+  });
+  bar.title = total + " " + what;
+  return bar;
+}
+function renderStatsChart(v, box) {
+  const labels = bucketLabels(v.bucket_minutes || [15, 30, 60, 120, 240]);
+  const lg = el("div", "legend");
+  labels.forEach((l, k) => { const i = el("i"); i.style.background = BUCKET_COLORS[k]; const s = el("span"); s.append(i, l); lg.append(s); });
+  const pick = sel([["passed", "finished stays"], ["now", "sitting there now"]], statsMore);
+  pick.setAttribute("aria-label", "which durations");
+  pick.style.width = "auto"; pick.style.fontSize = "11px";
+  pick.addEventListener("change", () => { statsMore = pick.value; renderStats(lastStats); });
+  box.append(pick, lg);
+  const g = el("div", "dist");
+  for (const [key, label] of COLS) {
+    const x = v.columns[key] || {};
+    const counts = (statsMore === "now" ? x.now_buckets : x.buckets) || [];
+    g.append(el("span", null, label), distBar(counts, labels, statsMore === "now" ? "issues now" : "stays"));
+  }
+  box.append(g);
+  const g2 = el("div", "dist");
+  g2.style.marginTop = "10px";
+  for (const [k, label] of [["cycle_time", "Cycle time"], ["lead_time", "Lead time"]]) {
+    const x = v[k];
+    g2.append(el("span", null, label), distBar(x.buckets || [], labels, "issues"));
+    g2.append(el("span"), el("span", "w", x.count + " issues · median " + hours(x.median_hours) + " · p90 " + hours(x.p90_hours)));
+  }
+  box.append(g2);
+}
 function renderStats(v) {
+  lastStats = v;
   const box = document.getElementById("stats");
   box.replaceChildren();
   box.className = "";
+  for (const b of document.querySelectorAll("#statsMode button")) b.classList.toggle("on", b.dataset.m === statsMode);
+  if (statsMode === "chart") return renderStatsChart(v, box);
   const t = el("table");
   const hr = el("tr");
   for (const h of ["column", "passed", "median", "p90", "now", "oldest"]) hr.append(el("th", null, h));
@@ -1243,6 +1319,11 @@ async function poll() {
   setTimeout(poll, 1500);
 }
 document.getElementById("statsWindow").addEventListener("change", () => refresh());
+for (const b of document.querySelectorAll("#statsMode button")) b.addEventListener("click", () => {
+  statsMode = b.dataset.m;
+  try { localStorage.setItem("ait-stats-mode", statsMode); } catch (e) { /* per-browser convenience only */ }
+  if (lastStats) renderStats(lastStats);
+});
 document.getElementById("vboard").addEventListener("click", () => setView("board"));
 document.getElementById("vlist").addEventListener("click", () => setView("list"));
 document.getElementById("vrel").addEventListener("click", () => setView("releases"));

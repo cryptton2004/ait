@@ -191,7 +191,10 @@ Every change runs the same `ait` command the CLI would (`add`, `edit`,
 dashboard shows the refusal and an explicit "Override (--force)" button.
 Cards show stale claims with a badge (and a filter), column headers show
 WIP "live / limit", issue details have the acceptance checklist, and the
-Flow panel shows `ait stats` for 7 days, 30 days or all time. Dropping a card
+Flow panel shows `ait stats` for 7 days, 30 days or all time, as a table or
+as a chart: one stacked bar per column showing how long stays took
+(0-15m, 15-30m, 30-60m, 1-2h, 2-4h, 4h+), or how long the issues sitting
+there now have waited, plus cycle and lead time. Dropping a card
 on In review submits it; dropping it on Released runs `ship`.
 Dropping a card on In progress claims it for you (session `dashboard`) with a lease you choose (60m prefilled, for example 2d); dropping it back on Ready releases it, and Done closes it with that claim. Imports and backups stay on the command line.
 

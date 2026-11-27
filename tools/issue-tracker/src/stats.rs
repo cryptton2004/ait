@@ -49,9 +49,26 @@ struct Track {
     first_claim: Option<i64>,
 }
 
+/// Upper edges (minutes) of the duration buckets: 0-15m, 15-30m, 30-60m,
+/// 1-2h, 2-4h and 4h+ (the last bucket has no edge).
+pub const BUCKET_MINUTES: &[i64] = &[15, 30, 60, 120, 240];
+
+/// How many durations fall in each bucket (one more bucket than edges).
+fn buckets(v: &[i64]) -> Vec<usize> {
+    let mut out = vec![0; BUCKET_MINUTES.len() + 1];
+    for ms in v {
+        let i = BUCKET_MINUTES
+            .iter()
+            .position(|m| *ms < m * 60_000)
+            .unwrap_or(BUCKET_MINUTES.len());
+        out[i] += 1;
+    }
+    out
+}
+
 fn summarize(mut v: Vec<i64>) -> Value {
     if v.is_empty() {
-        return json!({"count": 0, "avg_hours": null, "median_hours": null, "p90_hours": null});
+        return json!({"count": 0, "avg_hours": null, "median_hours": null, "p90_hours": null, "buckets": buckets(&v)});
     }
     v.sort_unstable();
     let h = |ms: i64| (ms as f64 / 3_600_000.0 * 10.0).round() / 10.0;
@@ -63,6 +80,7 @@ fn summarize(mut v: Vec<i64>) -> Value {
         "avg_hours": h(sum / i64::try_from(n).unwrap_or(1)),
         "median_hours": h(pick(0.5)),
         "p90_hours": h(pick(0.9)),
+        "buckets": buckets(&v),
     })
 }
 
@@ -170,6 +188,7 @@ pub fn stats_json(c: &Connection, env: &Env, since: Option<i64>) -> Result<Value
             o.insert("now".to_string(), json!(ages.len()));
             let cur = summarize(ages);
             o.insert("now_avg_hours".to_string(), cur["avg_hours"].clone());
+            o.insert("now_buckets".to_string(), cur["buckets"].clone());
             o.insert("now_max_hours".to_string(), {
                 let m = tracks
                     .values()
@@ -186,6 +205,7 @@ pub fn stats_json(c: &Connection, env: &Env, since: Option<i64>) -> Result<Value
         "cycle_time": summarize(cycle),
         "lead_time": summarize(lead),
         "since": since.map(crate::time::iso),
+        "bucket_minutes": BUCKET_MINUTES,
     }))
 }
 
