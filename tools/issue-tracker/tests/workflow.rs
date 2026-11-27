@@ -923,3 +923,23 @@ fn bugs_work_like_tasks() {
     assert_eq!(f["rollup"]["done"], 1, "{f}");
     assert_eq!(f["rollup"]["percent"], 100, "{f}");
 }
+
+/// The demo backlog shipped in examples/ must keep importing cleanly.
+#[test]
+fn demo_backlog_imports_and_checks_clean() {
+    let t = T::new("demo");
+    let path = format!("{}/examples/demo.jsonl", env!("CARGO_MANIFEST_DIR"));
+    let v = t.ok(None, &["import", "--issues", &path]);
+    assert_eq!(v["imported"], 100, "{v}");
+    assert_eq!(t.ok(None, &["check"])["ok"], true);
+    let types = t.ok(None, &["list", "--all", "--limit", "1000"]);
+    let count = |k: &str| {
+        types["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["type"] == k)
+            .count()
+    };
+    assert_eq!((count("release"), count("milestone")), (3, 3));
+}
