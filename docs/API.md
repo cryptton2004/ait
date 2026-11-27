@@ -7,7 +7,7 @@ integration tests in `tests/`. Anything not written here (text output, the
 dashboard's HTML, database tables) is internal and may change at any time.
 
 - Contract version: **1** (`GET /api/version` → `"api": 1`)
-- Database schema it was written against: **5**
+- Database schema it was written against: **5** (now **8**; every change since is additive)
 
 ## 1. Versioning rules
 
@@ -24,7 +24,8 @@ accepts) raises the version to 2, gets a note in this file, and the old
 behaviour stays documented until it is removed.
 
 Check compatibility at start-up with `GET /api/version` (HTTP) or
-`ait version --json` (CLI: `{"version", "schema"}`).
+`ait version --json` (CLI: `{"version", "schema", "mode"}`; `mode` is
+`local` or `remote`, and remote mode adds `"remote": "host:port"`).
 
 ## 2. Common shapes
 
@@ -94,11 +95,11 @@ means the same call may succeed later without changes (`BUSY`, `WIP_LIMIT`,
 | exit | HTTP | codes |
 |---|---|---|
 | 0 | 200 | success |
-| 1 | 500 | `DB_ERROR`, `IO_ERROR`, any unlisted code |
-| 2 | 400 | `USAGE`, `INVALID_ID`, `INVALID_INPUT`, `INVALID_STATE`, `UNKNOWN_PREFIX`, `CONFIG`, `NO_SESSION`, `NO_DB`, `INVALID_JSON`, `IMPORT_INVALID` |
+| 1 | 500 | `DB_ERROR`, `IO_ERROR`, `REMOTE_PROTOCOL`, any unlisted code |
+| 2 | 400 | `USAGE`, `INVALID_ID`, `INVALID_INPUT`, `INVALID_STATE`, `UNKNOWN_PREFIX`, `CONFIG`, `NO_SESSION`, `NO_DB`, `INVALID_JSON`, `IMPORT_INVALID`, `REMOTE_AUTH` (401/403), `REMOTE_TLS` |
 | 3 | 404 | `NOT_FOUND` |
 | 4 | 409 | `ALREADY_CLAIMED`, `CLAIM_STALE`, `STALE_GENERATION`, `NOT_CLAIMANT`, `NOT_CLAIMED`, `VERSION_CONFLICT`, `CYCLE`, `IN_USE`, `NOT_EMPTY`, `ID_TAKEN`, `GROUP_FULL`, `ALREADY_DONE`, `NOT_SHIPPABLE`, `REVIEWS_OPEN`, `REVIEW_NOT_STARTED`, `WIP_LIMIT`, `CRITERIA_OPEN` |
-| 5 | 503 | `BUSY` (retry) |
+| 5 | 503 | `BUSY` (retry), `REMOTE_UNREACHABLE`, `REMOTE_TIMEOUT` (remote mode; both retryable) |
 | 6 | 409 | `NO_WORK` (nothing to claim) |
 | 7 | — | `CHECK_FAILED` (`ait check` found problems) |
 
@@ -138,6 +139,9 @@ explains the workflow; `ait help` lists every option.
 | `stats` | see `/api/stats` |
 | `check` | `{"ok", "issues", "problems": [{"code", "issue", "message"}]}` (exit 7 when not ok) |
 | `export` / `import` | see `docs/COMMANDS.md` (export format 2) |
+| `remote add` | `{"client", "token"}` (the token is shown only here) |
+| `remote list` | `{"clients": [{"name", "created", "revoked", "active"}]}` |
+| `remote revoke` | `{"client", "revoked": true}` |
 
 **Blocker** (in `show`, `next --explain`): `{"code", "message", "ids"?}` with
 codes such as `STATE`, `TYPE`, `NEEDS`, `REVIEW_WAITS`, `WIP_LIMIT`,
@@ -164,7 +168,7 @@ policy (see below), and close the connection.
 
 | path | body |
 |---|---|
-| `/api/version` | `{"api": 1, "ait": "0.1.0", "schema": 7, "writable": true}` |
+| `/api/version` | `{"api": 1, "ait": "0.1.0", "schema": 8, "writable": true, "lan": false}` (`lan`: whether the LAN listener runs) |
 | `/api/head` | `{"head": N}` — latest event `seq`; poll this cheaply and refetch when it changes |
 | `/api/issues` | `{"head", "issues": [board item], "wip": {"in_progress": N, "in_review": N, "agent.<tier>": N}}` (configured limits only; count live items yourself from `issues`). Also `"agent_tiers": {tier: model}` (the configured `agent.<tier>` keys) |
 | `/api/issue/<ID>` | same object as `ait show --json` (50 notes) |
@@ -273,7 +277,58 @@ pages on an `allowed_origins` origin (`Content-Security-Policy:
 frame-ancestors 'self' <origins>`); without the setting every response says
 `X-Frame-Options: DENY`.
 
-## 6. Changelog
+## 6. LAN API (`ait serve --lan`)
+
+A second listener for other PCs: **TLS 1.3 only**, on `bind:lan_port`
+(default `0.0.0.0:7778`), with a self-signed certificate that clients pin by
+its SHA-256 fingerprint (no certificate authority). Connections from an
+address outside `lan_allow` are closed without a reply. Every response is
+`application/json; charset=utf-8` and closes the connection. Only two
+requests are served; anything else is 404 (405 for a wrong method).
+
+| request | answer |
+|---|---|
+| `GET /api/version` | `{"api": 1, "ait", "schema", "lan": true}` (no token needed) |
+| `POST /api/cli` | runs one command, see below |
+
+```
+POST /api/cli
+Content-Type: application/json
+X-Ait-Client-Token: <token from `ait remote add <name>`>
+
+{"args": ["claim", "CORE-1-00"], "session": "pc2-a1", "machine": "PC2",
+ "client": "0.1.0", "files": {"body.md": "text of the file"}}
+```
+
+- `args`: the command line as on the CLI (strings). `session`: the session
+  name (`--as` / `AIT_SESSION`; null for none). `machine`: the PC name stored
+  for the session (default: the client's name from `ait remote add`).
+  `client`: the client's `ait` version. `files`: optional, the text of every
+  file named by `--body-file`, `--text-file` or `--from-file` (key = the path as
+  given, `-` = stdin); the host never reads its own disk for these.
+- The command runs through the same code as the CLI on the host (same checks,
+  same `BEGIN IMMEDIATE` transaction, the host's clock).
+- Refused with `USAGE` in the reply: commands `serve`, `init`, `import`,
+  `backup`, `remote`; options `--db`, `--config`, `--as`, `--remote`, `--out`,
+  `--repo`. Output files are the client's job (`brief`'s `markdown`, `export`'s
+  `jsonl`).
+- Answer (HTTP 200 whenever the command ran, whatever its result):
+  `{"ok": true|false, "exit": N, "json": <the --json output or error object>,
+  "text": "<what text mode prints>"}`, plus `"warning": "..."` when the client
+  and host versions differ. With `ok: false`, `text` is the error line text
+  mode prints on stderr.
+- Token problems: missing or unknown token → 401, revoked → 403, both with
+  `REMOTE_AUTH`. Not JSON → 415; a malformed body → 400 `BAD_REQUEST`; a body
+  over 8 MB → 413.
+
+The `ait` client in remote mode adds the client-side errors
+`REMOTE_UNREACHABLE` (could not connect or finish the handshake within
+`remote_timeout_ms`; nothing was sent), `REMOTE_TIMEOUT` (sent, but no
+answer within `remote_reply_timeout_ms`; the command may have run),
+`REMOTE_TLS` (the host's certificate does not match `remote_fingerprint`) and
+`REMOTE_PROTOCOL` (an answer it did not understand).
+
+## 7. Changelog
 
 - **1** (2026-11-26): first published contract. Columns backlog → released,
   `in_review` / `released` states, review issues, `ship`, needs with
@@ -284,3 +339,8 @@ frame-ancestors 'self' <origins>`); without the setting every response says
   `evidence`, `possible_duplicates` on `add`, `/api/list`, `/api/releases`,
   `/api/events`, and the dashboard may run `delete`. Then (2026-11-27,
   additive): type `bug`, `size` in `/api/list`, duration `buckets` in stats.
+  Then (2026-11-28, additive, schema 8): LAN mode phase 1 — the LAN listener
+  with `POST /api/cli` and `GET /api/version`, `ait remote add|list|revoke`,
+  `mode` (and `remote`) in `ait version`, `lan` in `/api/version`, error codes
+  `REMOTE_UNREACHABLE`, `REMOTE_TIMEOUT`, `REMOTE_AUTH`, `REMOTE_TLS`,
+  `REMOTE_PROTOCOL`.

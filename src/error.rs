@@ -43,13 +43,14 @@ impl AitError {
     pub fn exit_code(&self) -> i32 {
         match self.code {
             "USAGE" | "INVALID_ID" | "INVALID_INPUT" | "INVALID_STATE" | "UNKNOWN_PREFIX"
-            | "CONFIG" | "NO_SESSION" | "NO_DB" | "INVALID_JSON" | "IMPORT_INVALID" => 2,
+            | "CONFIG" | "NO_SESSION" | "NO_DB" | "INVALID_JSON" | "IMPORT_INVALID"
+            | "REMOTE_AUTH" | "REMOTE_TLS" => 2,
             "NOT_FOUND" => 3,
             "ALREADY_CLAIMED" | "CLAIM_STALE" | "STALE_GENERATION" | "NOT_CLAIMANT"
             | "NOT_CLAIMED" | "VERSION_CONFLICT" | "CYCLE" | "IN_USE" | "NOT_EMPTY"
             | "ID_TAKEN" | "GROUP_FULL" | "ALREADY_DONE" | "NOT_SHIPPABLE" | "REVIEWS_OPEN"
             | "REVIEW_NOT_STARTED" | "WIP_LIMIT" | "CRITERIA_OPEN" => 4,
-            "BUSY" => 5,
+            "BUSY" | "REMOTE_UNREACHABLE" | "REMOTE_TIMEOUT" => 5,
             "NO_WORK" => 6,
             "CHECK_FAILED" => 7,
             _ => 1,
@@ -73,6 +74,12 @@ impl AitError {
         serde_json::json!({ "error": e })
     }
 
+    /// The line text mode prints (without the newline).
+    pub fn text_line(&self) -> String {
+        let hint = if self.retryable { " (retryable)" } else { "" };
+        format!("ait: error [{}]: {}{}", self.code, self.message, hint)
+    }
+
     /// JSON mode prints the error object on stdout (one stream for agents to
     /// parse); text mode prints a single line on stderr.
     pub fn print(&self, json: bool) {
@@ -81,8 +88,7 @@ impl AitError {
             let _ = writeln!(out, "{}", self.to_json());
         } else {
             let mut err = std::io::stderr().lock();
-            let hint = if self.retryable { " (retryable)" } else { "" };
-            let _ = writeln!(err, "ait: error [{}]: {}{}", self.code, self.message, hint);
+            let _ = writeln!(err, "{}", self.text_line());
         }
     }
 }

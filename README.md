@@ -4,7 +4,8 @@
 person running them, one shared backlog. Agents talk to it through a CLI that
 always answers in JSON; you watch and steer from a live local dashboard. The
 data is a SQLite file inside your repository's `.git` folder: no server, no
-account, nothing leaves your machine.
+account, nothing leaves your machine. Agents on other PCs in your LAN can
+share the same backlog through an encrypted connection to the PC that holds it.
 
 ![The ait board: overview panels with the flow chart, and the kanban columns](docs/screenshots/board.png)
 
@@ -59,6 +60,7 @@ where the last session stopped.
 | Releases | Roll-up progress for features, milestones and releases; `ait ship` checks every member is done and merged |
 | Dashboard | Kanban board with drag and drop, list view with search, filters and bulk changes, releases view with expected dates, roadmap, flow statistics (table or chart), activity feed |
 | Integration | Versioned HTTP API and live event stream for your own UI ([API.md](docs/API.md)), CORS for local origins |
+| Several PCs | LAN mode: one host PC keeps the database, agents on other PCs use the same `ait` commands over TLS 1.3 with a pinned certificate and a revocable token per PC; claims stay atomic |
 | Data safety | Database in `.git/ait/` (shared by worktrees, never committed), daily backups, readable export/import with a byte-for-byte round trip, `ait check` |
 
 | List view | Releases view |
@@ -129,6 +131,11 @@ Everything is one SQLite database in WAL mode; every write is a short
   `ait export` writes a readable JSONL file you can import again.
 - The dashboard listens on 127.0.0.1 only, checks the Host header, and needs
   a per-start token to change anything. `ait serve --read-only` is view-only.
+- LAN mode (`ait serve --lan`) is off by default. When on, other PCs connect
+  over TLS 1.3 to a certificate they pin by fingerprint, each with its own
+  token (`ait remote add` / `revoke`), and only from private network
+  addresses. They can run agent commands but never host jobs (backup, import,
+  serve), and the host never reads or writes a file path they name.
 
 ## Updating
 
@@ -144,7 +151,9 @@ at the end of [API.md](docs/API.md).
 
 ## Limitations
 
-- One machine: no sync between computers, no hosted version.
+- One database on one PC: other PCs in the LAN use it live (LAN mode); there
+  is no offline copy, no sync, and no hosted version. The dashboard is only on
+  the host PC for now.
 - No user accounts or permissions; sessions are names agents choose.
 - No GitHub/Jira sync (import from a JSONL inventory is supported).
 - Built and tested on Windows only for now.

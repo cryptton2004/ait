@@ -121,6 +121,15 @@ pub const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE issues ADD COLUMN due TEXT;
     ",
+    // 8: per-PC client tokens for the LAN mode (only a SHA-256 is stored)
+    "
+    CREATE TABLE clients (
+        name TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        created INTEGER NOT NULL,
+        revoked INTEGER
+    );
+    ",
 ];
 
 pub fn schema_version() -> i64 {
@@ -245,6 +254,9 @@ pub struct Env {
     pub session: Option<String>,
     pub cfg: Config,
     pub db_path: PathBuf,
+    /// The PC a remote call came from (as the client reported it); `None`
+    /// = this PC.
+    pub machine: Option<String>,
 }
 
 impl Env {
@@ -304,9 +316,7 @@ pub fn touch_session(conn: &Connection, env: &Env) -> Result<()> {
     if last.is_some_and(|l| env.now >= l && env.now - l < RENEW_EVERY_MS) {
         return Ok(());
     }
-    let machine = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok();
+    let machine = env.machine.clone().or_else(local_machine);
     write(conn, |c| {
         c.execute(
             "INSERT INTO sessions(name, machine, started, last_seen) VALUES (?1, ?2, ?3, ?3)
@@ -324,6 +334,14 @@ pub fn touch_session(conn: &Connection, env: &Env) -> Result<()> {
         )?;
         Ok(())
     })
+}
+
+/// This PC's name (`COMPUTERNAME` on Windows, `HOSTNAME` elsewhere).
+pub fn local_machine() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|m| !m.trim().is_empty())
 }
 
 pub fn meta_get(c: &Connection, key: &str) -> Result<Option<String>> {

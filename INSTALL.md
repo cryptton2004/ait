@@ -18,7 +18,7 @@ and `ait guide` print the same information from the program.
 - **Build:** from the ait repository root, run `cargo build --release`.
   The result is `target\release\ait.exe`.
 
-Check: `ait.exe version` prints `ait 0.1.0 (schema 7)` (or newer).
+Check: `ait.exe version` prints `ait 0.1.0 (schema 8, local)` (or newer).
 
 ## 2. Copy two files into the target repo
 
@@ -69,7 +69,7 @@ port = 7777
 ```
 
 Check, from the target repo root: `tools\ait\ait.exe init` prints
-`database ready: ...\.git\ait\tracker.db (schema 7)`.
+`database ready: ...\.git\ait\tracker.db (schema 8)`.
 
 ## 4. Load the backlog
 
@@ -242,6 +242,78 @@ JSON shapes that UI may rely on are in docs/API.md.
    features are added (`ait guide` always matches the installed build). An older
    `ait` refuses to open a newer database, so do not swap back without
    restoring the backup.
+
+## Add a second PC
+
+Agents on other PCs in the same LAN can work the same backlog. One PC, the
+**host**, keeps the only database and runs `ait serve --lan`; the other PCs
+send every command to it. Never put the database on a shared folder or NAS:
+SQLite over the network corrupts data.
+
+**On the host (once):**
+
+1. Make the certificate (needs Git for Windows, which ships `openssl.exe`).
+   The script is in the `scripts` folder of the ait zip (or of the ait
+   repository). Run it from the target repository's folder:
+
+   ```
+   powershell -ExecutionPolicy Bypass -File <ait folder>\scripts\make-cert.ps1
+   ```
+
+   (On Linux or in Git Bash: `sh <ait folder>/scripts/make-cert.sh`.)
+
+   It writes `cert.pem` and `key.pem` to `<repo>\.git\ait\tls\` and prints
+   `fingerprint: sha256:…`. It never overwrites existing files unless you pass
+   `-Force`. The key stays on this PC; never commit or copy it.
+2. Start the server: `tools\ait\ait.exe serve --lan` (or set `lan = true` in
+   `default.cfg`). The dashboard stays on `http://127.0.0.1:7777/`; other PCs
+   use port 7778. It prints the same `sha256:…` fingerprint.
+3. When Windows Firewall asks about `ait.exe`, allow it on **Private networks
+   only**, never on public networks. (If it did not ask: Windows Security →
+   Firewall & network protection → Allow an app through firewall → `ait.exe`,
+   tick Private only.) Make sure your home or office network is set to
+   *Private* in Windows network settings.
+4. Optional: limit who may connect, for example
+   `lan_allow = 192.168.1.0/24` in `default.cfg` (default: all private
+   address ranges).
+
+**For each agent PC:**
+
+1. On the host: `tools\ait\ait.exe remote add pc2`. It prints a 32-character
+   token **once** (only a hash is stored). Lost it? `ait remote revoke pc2`,
+   then `ait remote add pc2` again.
+2. On the agent PC (its own clone of the repository, with the same
+   `ait.exe` version in `tools\ait\`), create `tools\ait\remote.cfg` with
+   the host's address, LAN port and fingerprint (comments go on their own
+   lines):
+
+   ```
+   remote = 192.168.1.10:7778
+   remote_token_file = ait-remote.token
+   remote_fingerprint = sha256:<exactly as the host printed it>
+   ```
+
+   Save the token in `tools\ait\ait-remote.token`. Add both files to the
+   repository's `.gitignore`: they belong to this PC only. Do **not** put
+   these lines in the committed `default.cfg`, or the host would read them
+   too. Point ait at the file for every agent on this PC:
+   `setx AIT_CONFIG "<full path>\tools\ait\remote.cfg"` (then open a new
+   terminal). The other settings (prefixes, leases, approvals ...) always
+   come from the host's own `default.cfg`.
+3. Check: `ait.exe version` says `remote`, and `ait.exe list` shows the
+   host's backlog. Agents on that PC use `ait` exactly as on the host; give
+   their sessions names that include the PC, such as `AIT_SESSION=pc2-a1`.
+
+Good to know:
+
+- The host must be running for agents on other PCs: otherwise they get
+  `REMOTE_UNREACHABLE` (exit 5) and should wait. Nothing is queued.
+- A PC that is lost or retired: `ait remote revoke <name>` on the host.
+  `ait remote list` shows every PC and whether it is active.
+- A new certificate (after 10 years, or if the key leaked): run the script with
+  `-Force`, restart `ait serve --lan`, and paste the new fingerprint on every
+  PC. Until then they get `REMOTE_TLS`.
+- Backups, `import`, `ait remote` and the dashboard run on the host only.
 
 ## Command summary
 

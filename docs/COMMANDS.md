@@ -75,7 +75,8 @@ refused unless they pass `--force` (the owner's escape hatch).
 ## Commands
 
 Every command accepts `--json` (machine output), `--as <session>`,
-`--db <file>` and `--config <file>`. Ids are case-insensitive, and old
+`--db <file>`, `--config <file>` and `--remote host:port` (see
+[LAN mode](#lan-mode-several-pcs)). Ids are case-insensitive, and old
 `legacy` names are accepted anywhere an id is.
 
 | Command | What it does |
@@ -103,7 +104,8 @@ Every command accepts `--json` (machine output), `--as <session>`,
 | `stats [--since 7d]` | Flow stats from the event log: per column how many issues passed and how long they stayed (median, p90), how many sit there now and the oldest; cycle time (first claim to done) and lead time (added to done) |
 | `board [--limit N]` | One screen: in progress, stale, waiting (decision or blocked), ready, recently done |
 | `activity` | Event feed: `--since 1h`, `--after SEQ`, `--issue ID`, `--limit N` |
-| `serve [--port N] [--read-only]` | Dashboard at `http://127.0.0.1:7777/` (see below). Stop it with Ctrl+C |
+| `serve [--port N] [--read-only] [--lan [--lan-port N] [--bind addr]]` | Dashboard at `http://127.0.0.1:7777/` (see below). Stop it with Ctrl+C. `--lan` (or `lan = true`) also serves other PCs over TLS (see [LAN mode](#lan-mode-several-pcs)) |
+| `remote add <name>` / `remote list` / `remote revoke <name>` | Host only: client tokens for other PCs. `add` prints a 32-character token once (only its SHA-256 is stored); a name that already has an active token is refused (`IN_USE`) until it is revoked |
 | `check [--git] [--repo dir]` | Consistency check (ids, states, types, priorities, cycles, dangling links, duplicate legacy names). `--git` reads the repository from `repo =` (or `--repo`), not the current folder, and compares first-parent merge commits on `main` whose last paragraph carries `Issue-ID: <id>` lines: `DONE_NOT_MERGED` (done, not merged, not in `git_baseline`) and `MERGED_NOT_DONE` |
 | `backup` | Backup now. A daily backup also happens automatically |
 | `export [--out f]` / `import <f>` | Readable JSONL dump and restore (into an empty database). Import validates everything first and writes nothing if anything is wrong; `IMPORT_INVALID` lists every problem in `error.details.problems` |
@@ -237,6 +239,54 @@ API with CORS, get the token from `/api/token`, and show the dashboard in an
 iframe; every other origin stays refused. The endpoints and every `--json`
 shape are a versioned contract in [API.md](API.md).
 
+## LAN mode (several PCs)
+
+One PC (the **host**) keeps the only database; agents on other PCs send each
+command to it. A claim is still one `BEGIN IMMEDIATE` transaction on the host,
+so two PCs racing for an issue get one winner and one `ALREADY_CLAIMED`, and
+all times come from the host's clock. Setting it up is described in
+[INSTALL.md](../INSTALL.md#add-a-second-pc).
+
+**Host:** `ait serve --lan` keeps the plain-HTTP dashboard on
+`127.0.0.1:<port>` unchanged and adds a TLS 1.3 listener on `bind` (default
+`0.0.0.0`) at `lan_port` (default `port + 1`, so 7778). It needs
+`tls_cert` / `tls_key` (default `cert.pem` / `key.pem` in a `tls` folder next to
+the database, made by `scripts/make-cert.ps1` or `scripts/make-cert.sh`),
+refuses to start without them, and prints the certificate's fingerprint
+(`sha256:<hex>`). Connections from addresses outside `lan_allow` (default:
+the private ranges `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` and this PC)
+are closed without a reply. Each PC needs its own token: `ait remote add pc2`.
+
+**Agent PC:** `remote = <host>:7778`, `remote_token_file` and
+`remote_fingerprint` in its `default.cfg` (or `AIT_REMOTE`, `AIT_REMOTE_TOKEN`,
+`--remote`; `--remote` beats `AIT_REMOTE` beats `remote =`, and `off` turns
+remote mode off for one call). Then:
+
+- every command prints exactly what it would print locally (same JSON, text
+  and exit code); `ait version` says `mode: remote`;
+- no local database is opened or created, and `db =` / `--db` are not used;
+- `--body-file`, `--text-file` and `--from-file` (and `-` for stdin) are read
+  on this PC and sent along; `brief --out` and `export --out` are written on
+  this PC. The host never reads or writes a path another PC names;
+- `serve`, `init`, `import`, `backup` and `remote` are host jobs and are
+  refused, as are `--db`, `--config`, `--as` (use `AIT_SESSION`), and
+  `check --repo` (the host uses its own repository);
+- the host records the PC's name (`COMPUTERNAME`) for the session;
+- if the two `ait` versions differ the command still runs and a warning is
+  printed on stderr.
+
+When the host cannot be reached the command fails with `REMOTE_UNREACHABLE`
+(exit 5, retryable) within `remote_timeout_ms` (default 3 s). There is no
+local fallback and no queue. If the command was sent but no answer came within
+`remote_reply_timeout_ms` (default 60 s), it fails with `REMOTE_TIMEOUT` (exit
+5): it may or may not have run, so check (`ait list --claimed --as <you>`)
+before retrying. A wrong or revoked token is `REMOTE_AUTH` (exit 2); a host
+certificate that does not match `remote_fingerprint` is `REMOTE_TLS` (exit 2).
+
+Not yet over the LAN: the dashboard (it stays on the host's 127.0.0.1), a
+`git fetch` before `ship`, and a guard against two PCs using the same session
+name, so give sessions names that include the PC (`pc2-a1`).
+
 ## Errors and exit codes
 
 With `--json`, an error is printed on stdout as
@@ -246,11 +296,11 @@ Without `--json`, a one-line message goes to stderr.
 | Exit | Meaning | Codes |
 |---|---|---|
 | 0 | ok | |
-| 1 | internal / database / disk error | `DB_ERROR`, `IO_ERROR`, `INTERNAL` |
-| 2 | bad input or setup | `USAGE`, `INVALID_ID`, `INVALID_INPUT`, `INVALID_STATE`, `UNKNOWN_PREFIX`, `CONFIG`, `NO_SESSION`, `NO_DB`, `IMPORT_INVALID` |
+| 1 | internal / database / disk error | `DB_ERROR`, `IO_ERROR`, `INTERNAL`, `REMOTE_PROTOCOL` (the host's answer was not understood) |
+| 2 | bad input or setup | `USAGE`, `INVALID_ID`, `INVALID_INPUT`, `INVALID_STATE`, `UNKNOWN_PREFIX`, `CONFIG`, `NO_SESSION`, `NO_DB`, `IMPORT_INVALID`, `REMOTE_AUTH` (wrong or revoked client token), `REMOTE_TLS` (host certificate does not match the pin) |
 | 3 | not found | `NOT_FOUND` |
 | 4 | conflict | `ALREADY_CLAIMED`, `CLAIM_STALE`, `STALE_GENERATION`, `NOT_CLAIMANT`, `NOT_CLAIMED`, `VERSION_CONFLICT`, `CYCLE`, `IN_USE`, `ID_TAKEN`, `GROUP_FULL`, `ALREADY_DONE`, `NOT_EMPTY`, `NOT_SHIPPABLE`, `REVIEWS_OPEN`, `REVIEW_NOT_STARTED`, `WIP_LIMIT` (retryable), `CRITERIA_OPEN` |
-| 5 | busy, retry shortly | `BUSY` |
+| 5 | busy or host unreachable, retry shortly | `BUSY`, `REMOTE_UNREACHABLE`, `REMOTE_TIMEOUT` (the command may have run: check first) |
 | 6 | nothing ready to claim | `NO_WORK` |
 | 7 | `check` found problems | |
 
@@ -289,7 +339,9 @@ cargo test --all-targets
 
 Integration tests in `tests/` run the real binary against temporary databases
 under `target/tmp/`. `AIT_NOW_MS` overrides the clock, and exists only so tests
-can expire leases without sleeping.
+can expire leases without sleeping. The LAN tests use the certificate in
+`tests/fixtures/test-only-*.pem`, which exists only for tests (never use it for
+a real host), and bind to 127.0.0.1 only.
 
 | File | Contents |
 |---|---|
@@ -302,6 +354,8 @@ can expire leases without sleeping.
 | `src/board.rs` | board and activity |
 | `src/check.rs`, `src/backup.rs`, `src/exchange.rs` | check, backups, export/import |
 | `src/serve.rs`, `src/dashboard.html` | local dashboard |
+| `src/lan.rs`, `src/clients.rs` | LAN listener and `/api/cli` on the host, `ait remote` tokens |
+| `src/remote.rs`, `src/tls.rs` | remote mode on agent PCs, TLS with a pinned certificate |
 | `src/config.rs`, `src/approvals.rs` | default.cfg and approvals |
 | `src/roadmap.rs` | rollups and `ait roadmap` |
 | `src/roadmap.rs` (cont.), `src/criteria.rs`, `src/stats.rs` | `ship` and auto-rollup, acceptance criteria, flow stats |

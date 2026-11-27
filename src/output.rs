@@ -7,6 +7,9 @@ pub struct Output {
     pub json: Value,
     pub text: String,
     pub exit: i32,
+    /// An error answered by a remote host: printed the way a local error is
+    /// (JSON on stdout, the text line on stderr).
+    pub is_error: bool,
 }
 
 impl Output {
@@ -15,10 +18,16 @@ impl Output {
             json,
             text: text.into(),
             exit: 0,
+            is_error: false,
         }
     }
 
     pub fn print(&self, json_mode: bool) {
+        if self.is_error && !json_mode {
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(err, "{}", self.text);
+            return;
+        }
         let mut out = std::io::stdout().lock();
         if json_mode {
             let _ = writeln!(out, "{}", self.json);
