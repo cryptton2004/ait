@@ -1,5 +1,5 @@
 //! `ait`: agent-first issue tracker. One binary, one local SQLite database.
-//! See tools/issue-tracker/README.md and DesignIteration6.md.
+//! See tools/issue-tracker/README.md.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(

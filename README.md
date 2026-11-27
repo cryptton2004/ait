@@ -23,7 +23,6 @@ repository and run `ait init`.
 | Install it in a repository (written for agents) | [tools/issue-tracker/INSTALL.md](tools/issue-tracker/INSTALL.md) |
 | Every command, the dashboard, import/export | [tools/issue-tracker/README.md](tools/issue-tracker/README.md) |
 | Build a UI on top of it (HTTP + JSON contract) | [tools/issue-tracker/API.md](tools/issue-tracker/API.md) |
-| Understand the design and its decisions | [DesignIteration6.md](DesignIteration6.md) |
 | Work on the code (rules for agents) | [AGENTS.md](AGENTS.md) |
 
 ## Building

@@ -14,8 +14,7 @@ It solves three problems, in this order:
 3. **Seeing progress.** `ait board`, `ait activity` and the `ait serve`
    dashboard.
 
-The design is in `DesignIteration6.md` at the repository root. This README
-describes what is actually built.
+This README describes what is actually built.
 
 **Installing `ait` in another repository?** Follow [INSTALL.md](INSTALL.md):
 where to copy the files, what to put in `default.cfg`, the block to add to

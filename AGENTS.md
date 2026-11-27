@@ -6,8 +6,8 @@ This repository is **`ait`**, an agent-first issue tracker: one Rust binary that
 
 ## 0. Before you start
 
-1. Read `DesignIteration2.md` (current design; section 9 lists decisions). `DesignIteration1.md` is background only.
-2. Do not start implementation work that depends on an **open** decision in section 9. If a task needs one, stop and ask the owner.
+1. Read `tools/issue-tracker/README.md` (what is built) and, if present, the owner's local design notes (`DesignIteration*.md` at the root, newest number = current design; they are not in git).
+2. Do not start implementation work that depends on an **open** decision in those notes. If a task needs one, stop and ask the owner.
 3. Run `git status`. If the tree has changes you did not make, do not touch, stage, stash or discard them; ask.
 
 ## 1. Stay inside this folder
@@ -75,4 +75,4 @@ End every task with a short plain-English summary for a non-Rust owner:
 2. Which tests prove it, and the gate result.
 3. What is not done, known risks, and anything that needs the owner's decision.
 
-If you changed the design, update `DesignIteration2.md` (or its successor) in the same commit. Decisions that change the goal, the stack or the dependency list belong to the owner: ask, don't decide.
+If you changed behaviour, update README.md, API.md and INSTALL.md in the same commit; if the local design notes exist, update the newest one as well (it is never committed). Decisions that change the goal, the stack or the dependency list belong to the owner: ask, don't decide.
