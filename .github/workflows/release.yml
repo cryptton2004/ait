@@ -64,11 +64,12 @@ jobs:
         run: |
           name="ait-$VERSION-windows-x64"
           # Same layout as the repository, so the links between the docs work.
-          mkdir -p "dist/$name/docs" "dist/$name/examples"
+          mkdir -p "dist/$name/docs" "dist/$name/examples" "dist/$name/scripts"
           cp target/release/ait.exe default.cfg approvals.example.json \
              README.md INSTALL.md LICENSE "dist/$name/"
           cp docs/COMMANDS.md docs/API.md "dist/$name/docs/"
           cp examples/demo.jsonl "dist/$name/examples/"
+          cp scripts/make-cert.ps1 scripts/make-cert.sh "dist/$name/scripts/"
           cd dist
           7z a "$name.zip" "$name" > /dev/null
           sha256sum "$name.zip" > "$name.zip.sha256"

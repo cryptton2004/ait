@@ -13,6 +13,7 @@ mod backup;
 mod board;
 mod check;
 mod claims;
+mod clients;
 mod config;
 mod criteria;
 mod db;
@@ -21,12 +22,15 @@ mod exchange;
 mod guide;
 mod ids;
 mod issues;
+mod lan;
 mod notes;
 mod output;
+mod remote;
 mod roadmap;
 mod serve;
 mod stats;
 mod time;
+mod tls;
 
 use args::Args;
 use error::{AitError, Result};
@@ -74,10 +78,11 @@ fn db_path(explicit: Option<String>, cfg: &config::Config) -> Result<PathBuf> {
 }
 
 fn run(raw: Vec<String>) -> Result<Output> {
-    let mut a = Args::parse(raw)?;
+    let mut a = Args::parse(raw.clone())?;
     let db_opt = a.take_opt("db");
     let cfg_opt = a.take_opt("config");
     let as_opt = a.take_opt("as");
+    let remote_opt = a.take_opt("remote");
     let Some(cmd) = a.shift() else {
         return Ok(guide::usage());
     };
@@ -85,10 +90,23 @@ fn run(raw: Vec<String>) -> Result<Output> {
         "help" => return Ok(guide::usage()),
         "guide" => return Ok(guide::guide()),
         "version" => {
+            // A broken config must not hide the version; it only decides the mode.
+            let cfg = config::load(cfg_opt.as_deref()).ok();
+            let target = remote::target(remote_opt, cfg.as_ref()).ok().flatten();
+            let mode = if target.is_some() { "remote" } else { "local" };
+            let mut j = json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "schema": db::schema_version(),
+                "mode": mode,
+            });
+            if let (Some(t), Some(o)) = (&target, j.as_object_mut()) {
+                o.insert("remote".to_string(), json!(t));
+            }
+            let place = target.map(|t| format!(", remote {t}")).unwrap_or_default();
             return Ok(Output::new(
-                json!({"version": env!("CARGO_PKG_VERSION"), "schema": db::schema_version()}),
+                j,
                 format!(
-                    "ait {} (schema {})",
+                    "ait {} (schema {}, {mode}{place})",
                     env!("CARGO_PKG_VERSION"),
                     db::schema_version()
                 ),
@@ -111,12 +129,21 @@ fn run(raw: Vec<String>) -> Result<Output> {
             "session name '{s}' must be 1-64 characters of letters, digits and . _ : @ -"
         )));
     }
+    if let Some(target) = remote::target(remote_opt, Some(&cfg))? {
+        // Never open or create a local database in remote mode.
+        let mut rest = raw;
+        for o in ["config", "remote", "as"] {
+            rest = args::strip_opt(&rest, o).0;
+        }
+        return remote::run(&cmd, rest, &a, session, &cfg, &target);
+    }
     let path = db_path(db_opt, &cfg)?;
     let env = db::Env {
         now: time::now_ms()?,
         session,
         cfg,
         db_path: path,
+        machine: None,
     };
     let conn = db::open(&env.db_path)?;
     db::touch_session(&conn, &env)?;
@@ -169,6 +196,7 @@ pub fn dispatch(cmd: &str, c: &rusqlite::Connection, env: &db::Env, a: &Args) ->
         "export" => exchange::cmd_export(c, env, a),
         "import" => exchange::cmd_import(c, env, a),
         "serve" => serve::cmd_serve(c, env, a),
+        "remote" => clients::cmd_remote(c, env, a),
         other => Err(AitError::usage(format!(
             "unknown command '{other}' (run `ait help`)"
         ))),

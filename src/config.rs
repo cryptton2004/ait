@@ -110,6 +110,27 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
     pub main_branch: String,
     pub trailer: String,
+    /// `ait serve` also starts the TLS listener for other PCs.
+    pub lan: bool,
+    /// Address the LAN listener binds to; `None` = 0.0.0.0.
+    pub bind: Option<std::net::IpAddr>,
+    /// Port of the LAN listener; `None` = dashboard port + 1.
+    pub lan_port: Option<u16>,
+    /// Addresses allowed to connect to the LAN listener; `None` = private
+    /// ranges and loopback.
+    pub lan_allow: Option<Vec<crate::lan::Cidr>>,
+    /// TLS certificate and key; `None` = `<db folder>/tls/cert.pem`, `key.pem`.
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
+    /// Remote mode: `host:port` of an `ait serve --lan` host.
+    pub remote: Option<String>,
+    pub remote_token_file: Option<PathBuf>,
+    /// Pinned host certificate, 64 lowercase hex characters.
+    pub remote_fingerprint: Option<String>,
+    /// Time to connect and finish the TLS handshake.
+    pub remote_timeout_ms: u64,
+    /// Time to wait for the answer once the command was sent.
+    pub remote_reply_timeout_ms: u64,
     /// The config file that was loaded, if any.
     pub source: Option<PathBuf>,
 }
@@ -131,6 +152,17 @@ impl Default for Config {
             port: 7777,
             main_branch: "main".to_string(),
             trailer: "Issue-ID".to_string(),
+            lan: false,
+            bind: None,
+            lan_port: None,
+            lan_allow: None,
+            tls_cert: None,
+            tls_key: None,
+            remote: None,
+            remote_token_file: None,
+            remote_fingerprint: None,
+            remote_timeout_ms: 3000,
+            remote_reply_timeout_ms: 60_000,
             source: None,
         }
     }
@@ -160,6 +192,15 @@ pub fn load(explicit: Option<&str>) -> Result<Config> {
             cfg.source = Some(p);
             Ok(cfg)
         }
+    }
+}
+
+/// A path setting: empty or `auto` means the built-in default.
+fn opt_path(dir: &Path, v: &str) -> Option<PathBuf> {
+    if v.is_empty() || v == "auto" {
+        None
+    } else {
+        Some(resolve(dir, v))
     }
 }
 
@@ -287,6 +328,76 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config> {
                     return Err(bad("trailer must be a word such as Issue-ID"));
                 }
                 cfg.trailer = v.to_string()
+            }
+            "lan" => {
+                cfg.lan = match v {
+                    "true" | "yes" | "on" | "1" => true,
+                    "false" | "no" | "off" | "0" | "" => false,
+                    _ => return Err(bad("lan must be true or false")),
+                }
+            }
+            "bind" => {
+                cfg.bind = if v.is_empty() {
+                    None
+                } else {
+                    Some(v.parse().map_err(|_| {
+                        bad("bind must be an IP address such as 0.0.0.0 or 192.168.1.10")
+                    })?)
+                }
+            }
+            "lan_port" => {
+                cfg.lan_port = if v.is_empty() || v == "auto" {
+                    None
+                } else {
+                    Some(
+                        v.parse()
+                            .ok()
+                            .ok_or_else(|| bad("lan_port must be 0..65535"))?,
+                    )
+                }
+            }
+            "lan_allow" => {
+                let mut list = Vec::new();
+                for part in v.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                    list.push(crate::lan::Cidr::parse(part).map_err(|e| bad(&e))?);
+                }
+                if list.is_empty() {
+                    return Err(bad(
+                        "lan_allow needs at least one address range, e.g. 192.168.1.0/24",
+                    ));
+                }
+                cfg.lan_allow = Some(list);
+            }
+            "tls_cert" => cfg.tls_cert = opt_path(dir, v),
+            "tls_key" => cfg.tls_key = opt_path(dir, v),
+            "remote" => {
+                cfg.remote = if v.is_empty() || v == "off" {
+                    None
+                } else {
+                    Some(crate::remote::check_target(v).map_err(|e| bad(&e))?)
+                }
+            }
+            "remote_token_file" => cfg.remote_token_file = opt_path(dir, v),
+            "remote_fingerprint" => {
+                cfg.remote_fingerprint = if v.is_empty() {
+                    None
+                } else {
+                    Some(crate::tls::parse_fingerprint(v).map_err(|e| bad(&e))?)
+                }
+            }
+            "remote_timeout_ms" => {
+                cfg.remote_timeout_ms = v
+                    .parse()
+                    .ok()
+                    .filter(|m: &u64| (1..=600_000).contains(m))
+                    .ok_or_else(|| bad("remote_timeout_ms must be 1..600000"))?
+            }
+            "remote_reply_timeout_ms" => {
+                cfg.remote_reply_timeout_ms = v
+                    .parse()
+                    .ok()
+                    .filter(|m: &u64| (1..=3_600_000).contains(m))
+                    .ok_or_else(|| bad("remote_reply_timeout_ms must be 1..3600000"))?
             }
             _ => return Err(bad(&format!("unknown key '{k}'"))),
         }
@@ -467,6 +578,50 @@ mod tests {
     fn shipped_approvals_example_is_valid() {
         let a = crate::approvals::parse(include_str!("../approvals.example.json")).unwrap();
         assert!(a.in_use());
+    }
+
+    #[test]
+    fn lan_and_remote_keys() {
+        let dir = Path::new("base");
+        let c = parse(
+            "lan = true
+bind = 127.0.0.1
+lan_port = 9000
+lan_allow = 192.168.1.0/24, 10.1.2.3
+tls_cert = tls/c.pem
+tls_key = tls/k.pem
+remote = host-a:7778
+remote_token_file = pc2.token
+remote_fingerprint = sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD
+remote_timeout_ms = 500
+",
+            dir,
+        )
+        .unwrap();
+        assert!(c.lan);
+        assert_eq!(c.bind, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(c.lan_port, Some(9000));
+        assert_eq!(c.lan_allow.as_ref().map(Vec::len), Some(2));
+        assert_eq!(c.tls_cert, Some(dir.join("tls/c.pem")));
+        assert_eq!(c.remote.as_deref(), Some("host-a:7778"));
+        assert_eq!(c.remote_token_file, Some(dir.join("pc2.token")));
+        assert_eq!(
+            c.remote_fingerprint.as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        assert_eq!(c.remote_timeout_ms, 500);
+        for bad in [
+            "lan = maybe",
+            "bind = everywhere",
+            "lan_allow = 10.0.0.0/33",
+            "lan_allow = ,",
+            "remote = no-port",
+            "remote = host:99999",
+            "remote_fingerprint = sha256:1234",
+            "remote_timeout_ms = 0",
+        ] {
+            assert!(parse(bad, dir).is_err(), "{bad}");
+        }
     }
 
     #[test]

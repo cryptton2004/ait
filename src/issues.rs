@@ -281,15 +281,7 @@ pub fn read_text(a: &Args, name: &str) -> Result<Option<String>> {
             )));
         }
         (Some(t), None) => Some(t.to_string()),
-        (None, Some("-")) => {
-            let mut s = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
-            Some(s)
-        }
-        (None, Some(p)) => Some(
-            std::fs::read_to_string(p)
-                .map_err(|e| AitError::new("INVALID_INPUT", format!("cannot read {p}: {e}")))?,
-        ),
+        (None, Some(p)) => Some(a.read_file(p)?),
         (None, None) => None,
     };
     if let Some(t) = &text

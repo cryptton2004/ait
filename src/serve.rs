@@ -62,6 +62,7 @@ struct Server {
     port: u16,
     token: String,
     writable: bool,
+    lan: bool,
 }
 
 /// A random per-start token (std's randomly seeded hasher; no extra crate).
@@ -83,10 +84,16 @@ fn new_token() -> String {
 }
 
 pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
-    a.expect(&["port", "read-only"], 0)?;
+    a.expect(&["port", "read-only", "lan", "lan-port", "bind"], 0)?;
     let port = match a.opt_i64("port")? {
         Some(p) => u16::try_from(p).map_err(|_| AitError::usage("--port must be 0..65535"))?,
         None => env.cfg.port,
+    };
+    // The LAN listener is prepared first: without a certificate nothing starts.
+    let lan = if a.flag("lan") || env.cfg.lan {
+        Some(crate::lan::prepare(env, a, port)?)
+    } else {
+        None
     };
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
         AitError::new(
@@ -99,6 +106,7 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
         port: actual,
         token: new_token(),
         writable: !a.flag("read-only"),
+        lan: lan.is_some(),
     });
     {
         let mut out = std::io::stdout().lock();
@@ -111,7 +119,26 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
             out,
             "ait dashboard: http://127.0.0.1:{actual}/  ({mode}; Ctrl+C to stop)"
         );
+        if let Some(l) = &lan {
+            let _ = writeln!(
+                out,
+                "ait LAN: listening on {} (TLS 1.3; /api/cli for other PCs; allowed: {})",
+                l.addr,
+                l.allow_text()
+            );
+            let _ = writeln!(out, "ait LAN: certificate fingerprint {}", l.fingerprint);
+        }
         let _ = out.flush();
+    }
+    if let Some(l) = lan {
+        let base = Env {
+            now: 0,
+            session: None,
+            cfg: env.cfg.clone(),
+            db_path: env.db_path.clone(),
+            machine: None,
+        };
+        std::thread::spawn(move || crate::lan::run(l, base));
     }
     // One short-lived thread (with its own connection) per request, so an
     // idle browser connection cannot block the others.
@@ -126,6 +153,7 @@ pub fn cmd_serve(_c: &Connection, env: &Env, a: &Args) -> Result<Output> {
                 session: None,
                 cfg,
                 db_path,
+                machine: None,
             };
             let _ = handle(stream, &base, &server);
         });
@@ -524,15 +552,15 @@ fn event_stream(
     Ok(())
 }
 
-struct Request {
-    method: String,
-    target: String,
+pub(crate) struct Request {
+    pub method: String,
+    pub target: String,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    pub body: Vec<u8>,
 }
 
 impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -541,8 +569,11 @@ impl Request {
 }
 
 /// Reads one request: the head (at most 16 KB) and a body of
-/// `Content-Length` bytes (at most 2 MB). `Err` means a bad request.
-fn read_request(s: &mut TcpStream) -> std::io::Result<std::result::Result<Request, String>> {
+/// `Content-Length` bytes (at most `max_body`). `Err` means a bad request.
+pub(crate) fn read_request(
+    s: &mut impl Read,
+    max_body: usize,
+) -> std::io::Result<std::result::Result<Request, String>> {
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 8192];
     let head_end = loop {
@@ -577,7 +608,7 @@ fn read_request(s: &mut TcpStream) -> std::io::Result<std::result::Result<Reques
         .transpose()
         .map_err(|_| std::io::Error::other("bad Content-Length"))?
         .unwrap_or(0);
-    if len > MAX_BODY {
+    if len > max_body {
         return Ok(Err("request body too large".to_string()));
     }
     let mut body: Vec<u8> = buf[head_end + 4..].to_vec();
@@ -611,7 +642,7 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
     CORS.with(|c| *c.borrow_mut() = frame);
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let req = match read_request(&mut s) {
+    let req = match read_request(&mut s, MAX_BODY) {
         Ok(Ok(r)) => r,
         Ok(Err(m)) => return deny(&mut s, "400 Bad Request", "BAD_REQUEST", &m),
         Err(e) => return deny(&mut s, "400 Bad Request", "BAD_REQUEST", &e.to_string()),
@@ -677,6 +708,7 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
         session: None,
         cfg: base.cfg.clone(),
         db_path: base.db_path.clone(),
+        machine: None,
     };
     if path == "/" || path == "/index.html" {
         let page = PAGE
@@ -710,6 +742,7 @@ fn handle(mut s: TcpStream, base: &Env, srv: &Server) -> std::io::Result<()> {
             "ait": env!("CARGO_PKG_VERSION"),
             "schema": db::schema_version(),
             "writable": srv.writable,
+            "lan": srv.lan,
         })),
         "/api/board" => db::read(c, |c| board::board_json(c, &env, 50)),
         "/api/issues" => db::read(c, |c| issues_view(c, &env)),
@@ -900,6 +933,7 @@ fn run_args(base: &Env, args: Vec<String>) -> Result<Output> {
         session: Some(DASHBOARD_SESSION.to_string()),
         cfg: base.cfg.clone(),
         db_path: base.db_path.clone(),
+        machine: None,
     };
     let conn = db::open(&env.db_path)?;
     crate::dispatch(&cmd, &conn, &env, &a)

@@ -1,0 +1,26 @@
+# Weekly dependency updates, one grouped pull request per ecosystem.
+# Security updates for a RustSec advisory (rustls, ring, rusqlite ...) come as
+# soon as one is published once "Dependabot alerts" and "Dependabot security
+# updates" are on in Settings -> Code security.
+# AGENTS.md: a Dependabot pull request is a request for the owner's approval;
+# CI runs the full quality gate on it.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

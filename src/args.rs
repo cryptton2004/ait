@@ -23,16 +23,64 @@ const BOOL_FLAGS: &[&str] = &[
     "issues",
     "tree",
     "read-only",
+    "lan",
     "help",
 ];
 
 /// Options accepted by every command.
-const GLOBAL: &[&str] = &["json", "help", "db", "config", "as"];
+const GLOBAL: &[&str] = &["json", "help", "db", "config", "as", "remote"];
 
 #[derive(Debug, Default)]
 pub struct Args {
     pos: Vec<String>,
     opts: Vec<(String, Option<String>)>,
+    /// Remote mode on the host: the files (`--body-file` ...) the client
+    /// already read, by the path it was given. `Some` means this request
+    /// must never read the host's disk or stdin.
+    pub inline_files: Option<Vec<(String, String)>>,
+}
+
+/// Removes every `--name value` / `--name=value` from raw arguments (up to
+/// a `--`) and returns the remaining arguments and the last value.
+pub fn strip_opt(raw: &[String], name: &str) -> (Vec<String>, Option<String>) {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut found = None;
+    let mut it = raw.iter();
+    let long = format!("--{name}");
+    let eq = format!("--{name}=");
+    while let Some(a) = it.next() {
+        if a == "--" {
+            out.push(a.clone());
+            out.extend(it.cloned());
+            break;
+        }
+        if *a == long {
+            match it.next() {
+                Some(v) => found = Some(v.clone()),
+                // Leave it for the parser to report.
+                None => out.push(a.clone()),
+            }
+            continue;
+        }
+        if let Some(v) = a.strip_prefix(&eq) {
+            found = Some(v.to_string());
+            continue;
+        }
+        if let Some(n) = a.strip_prefix("--")
+            && !n.contains('=')
+            && !BOOL_FLAGS.contains(&n)
+            && !n.is_empty()
+        {
+            // Another option with a value: keep the value with it.
+            out.push(a.clone());
+            if let Some(v) = it.next() {
+                out.push(v.clone());
+            }
+            continue;
+        }
+        out.push(a.clone());
+    }
+    (out, found)
 }
 
 impl Args {
@@ -76,7 +124,36 @@ impl Args {
                 pos.push(a);
             }
         }
-        Ok(Args { pos, opts })
+        Ok(Args {
+            pos,
+            opts,
+            inline_files: None,
+        })
+    }
+
+    /// Text of a file named on the command line (`-` = stdin). On the host
+    /// of a remote call it comes only from what the client sent.
+    pub fn read_file(&self, path: &str) -> Result<String> {
+        if let Some(files) = &self.inline_files {
+            return files
+                .iter()
+                .rev()
+                .find(|(p, _)| p == path)
+                .map(|(_, t)| t.clone())
+                .ok_or_else(|| {
+                    AitError::new(
+                        "INVALID_INPUT",
+                        format!("cannot read {path}: the remote client did not send it"),
+                    )
+                });
+        }
+        if path == "-" {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+            return Ok(s);
+        }
+        std::fs::read_to_string(path)
+            .map_err(|e| AitError::new("INVALID_INPUT", format!("cannot read {path}: {e}")))
     }
 
     /// Removes and returns the first positional argument.
@@ -182,6 +259,44 @@ mod tests {
     fn missing_value_is_usage_error() {
         let r = Args::parse(vec!["--body".to_string()]);
         assert_eq!(r.unwrap_err().code, "USAGE");
+    }
+
+    #[test]
+    fn strip_opt_removes_only_that_option() {
+        let raw: Vec<String> = [
+            "brief", "X", "--out", "b.md", "--notes", "--out", "--json", "--", "--out", "z",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (rest, v) = strip_opt(&raw, "out");
+        // `--notes` takes the next word (`--out`) as its value.
+        assert_eq!(v.as_deref(), Some("b.md"));
+        assert_eq!(
+            rest,
+            vec![
+                "brief", "X", "--notes", "--out", "--json", "--", "--out", "z"
+            ]
+        );
+        let raw: Vec<String> = ["--remote=h:1", "list", "--remote", "h:2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (rest, v) = strip_opt(&raw, "remote");
+        assert_eq!(v.as_deref(), Some("h:2"));
+        assert_eq!(rest, vec!["list"]);
+    }
+
+    #[test]
+    fn inline_files_never_touch_the_disk() {
+        let mut a = p(&["add", "X", "t", "--body-file", "Cargo.toml"]);
+        a.inline_files = Some(vec![("Cargo.toml".into(), "sent".into())]);
+        assert_eq!(a.read_file("Cargo.toml").unwrap(), "sent");
+        assert_eq!(a.read_file("-").unwrap_err().code, "INVALID_INPUT");
+        assert_eq!(
+            a.read_file("src/main.rs").unwrap_err().code,
+            "INVALID_INPUT"
+        );
     }
 
     #[test]
