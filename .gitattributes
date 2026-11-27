@@ -1,3 +1,5 @@
 # A local vendor/ cache (git-ignored) is checksummed byte for byte: never
 # convert its line endings if it is ever added.
 vendor/** -text
+# Shell scripts must keep LF endings to run on Linux and in Git Bash.
+*.sh text eol=lf
