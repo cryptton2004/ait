@@ -137,6 +137,12 @@ in review, done and released.
   `default.cfg`. A full column refuses new claims (or submissions) with
   `WIP_LIMIT`, which is retryable; `next` skips tiers that are full.
 
+**Try it with demo data:** `examples/demo.jsonl` is a made-up backlog of 100
+issues (3 releases, 3 milestones, 14 features, tasks, bugs, reviews, links,
+labels and criteria). Load it into a scratch database and open the dashboard:
+`ait --db demo.db init`, `ait --db demo.db import --issues examples/demo.jsonl`,
+`ait --db demo.db serve`.
+
 **Inventory format (`import --issues`):** one JSON object per line. Fields:
 `title` (required), `id` or `legacy`, `type` (or `kind`), `body`, `state`
 (default `ready`), `reason`, `parent`, `release`, `needs` and `relates`
@@ -196,6 +202,9 @@ as a chart: one stacked bar per column showing how long stays took
 there now have waited, plus cycle and lead time. Dropping a card
 on In review submits it; dropping it on Released runs `ship`.
 Dropping a card on In progress claims it for you (session `dashboard`) with a lease you choose (60m prefilled, for example 2d); dropping it back on Ready releases it, and Done closes it with that claim. Imports and backups stay on the command line.
+
+The address can open a view directly: `#board`, `#list`, `#releases`, and
+`#board,chart` for the Flow chart (handy for bookmarks and links).
 
 The header switches between three views (remembered per browser) and has a
 search box that filters the board and the list:

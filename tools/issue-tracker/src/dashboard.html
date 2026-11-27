@@ -1197,6 +1197,7 @@ function setView(v) {
   document.getElementById("listview").hidden = v !== "list";
   document.getElementById("relview").hidden = v !== "releases";
   try { localStorage.setItem("ait-view", v); } catch (e) { /* private mode */ }
+  try { history.replaceState(null, "", "#" + v); } catch (e) { /* not allowed here */ }
   if (v === "list") renderList();
   if (v === "releases") renderReleases();
 }
@@ -1328,7 +1329,15 @@ document.getElementById("vboard").addEventListener("click", () => setView("board
 document.getElementById("vlist").addEventListener("click", () => setView("list"));
 document.getElementById("vrel").addEventListener("click", () => setView("releases"));
 document.getElementById("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(applySearch, 250); });
-try { const v = localStorage.getItem("ait-view"); if (v === "list" || v === "releases") setView(v); } catch (e) { /* private mode */ }
+// The address can pick the view (#board, #list, #releases) and the Flow
+// panel mode (#board,chart), so a view can be bookmarked or linked.
+{
+  const want = location.hash.slice(1).split(",");
+  if (want.includes("chart") || want.includes("table")) statsMode = want.includes("chart") ? "chart" : "table";
+  let v = ["board", "list", "releases"].find(x => want.includes(x));
+  if (!v) { try { v = localStorage.getItem("ait-view"); } catch (e) { /* private mode */ } }
+  if (v === "list" || v === "releases") setView(v);
+}
 if (WRITABLE) {
   const nb = document.getElementById("newbtn");
   nb.hidden = false;
