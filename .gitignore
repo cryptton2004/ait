@@ -6,3 +6,7 @@
 .claude/settings.local.json
 # The owner's design notes stay local.
 /DesignIteration*.md
+/design/
+/summary-for-board-session.md
+# Scratch folders anywhere in the repo.
+tmp/
