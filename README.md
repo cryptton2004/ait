@@ -60,7 +60,7 @@ where the last session stopped.
 | Releases | Roll-up progress for features, milestones and releases; `ait ship` checks every member is done and merged |
 | Dashboard | Kanban board with drag and drop, list view with search, filters and bulk changes, releases view with expected dates, roadmap, flow statistics (table or chart), activity feed |
 | Integration | Versioned HTTP API and live event stream for your own UI ([API.md](docs/API.md)), CORS for local origins |
-| Several PCs | LAN mode: one host PC keeps the database, agents on other PCs use the same `ait` commands over TLS 1.3 with a pinned certificate and a revocable token per PC; claims stay atomic |
+| Several PCs (optional) | LAN mode, off by default: one host PC keeps the database, agents on other PCs use the same `ait` commands over TLS 1.3 with a pinned certificate and a revocable token per PC; claims stay atomic |
 | Data safety | Database in `.git/ait/` (shared by worktrees, never committed), daily backups, readable export/import with a byte-for-byte round trip, `ait check` |
 
 | List view | Releases view |

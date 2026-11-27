@@ -243,7 +243,10 @@ JSON shapes that UI may rely on are in docs/API.md.
    `ait` refuses to open a newer database, so do not swap back without
    restoring the backup.
 
-## Add a second PC
+## Add a second PC (optional)
+
+**Skip this section if all your agents run on one PC**: a single-PC setup
+needs nothing from it, and LAN mode stays off unless you turn it on.
 
 Agents on other PCs in the same LAN can work the same backlog. One PC, the
 **host**, keeps the only database and runs `ait serve --lan`; the other PCs

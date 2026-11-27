@@ -241,11 +241,14 @@ shape are a versioned contract in [API.md](API.md).
 
 ## LAN mode (several PCs)
 
+Optional, and off by default: only needed when agents on more than one PC
+share a backlog. A single PC needs none of it.
+
 One PC (the **host**) keeps the only database; agents on other PCs send each
 command to it. A claim is still one `BEGIN IMMEDIATE` transaction on the host,
 so two PCs racing for an issue get one winner and one `ALREADY_CLAIMED`, and
 all times come from the host's clock. Setting it up is described in
-[INSTALL.md](../INSTALL.md#add-a-second-pc).
+[INSTALL.md](../INSTALL.md#add-a-second-pc-optional).
 
 **Host:** `ait serve --lan` keeps the plain-HTTP dashboard on
 `127.0.0.1:<port>` unchanged and adds a TLS 1.3 listener on `bind` (default
