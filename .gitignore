@@ -13,3 +13,6 @@
 /.cargo/
 # Scratch folders anywhere in the repo.
 tmp/
+# Built binaries (download from Releases or build into target/).
+/ait.exe
+/ait

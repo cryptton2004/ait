@@ -37,7 +37,7 @@ impl AitError {
         AitError::new("NOT_FOUND", format!("no issue matches '{what}'"))
     }
 
-    /// Exit codes (documented in README.md):
+    /// Exit codes (documented in docs/COMMANDS.md):
     /// 0 ok, 1 internal, 2 usage/invalid input, 3 not found, 4 conflict,
     /// 5 busy (retry), 6 no work available, 7 check found problems.
     pub fn exit_code(&self) -> i32 {

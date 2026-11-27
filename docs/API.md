@@ -137,7 +137,7 @@ explains the workflow; `ait help` lists every option.
 | `roadmap` | `{"releases", "milestones", "features"}`, each item with a `rollup` |
 | `stats` | see `/api/stats` |
 | `check` | `{"ok", "issues", "problems": [{"code", "issue", "message"}]}` (exit 7 when not ok) |
-| `export` / `import` | see `README.md` (export format 2) |
+| `export` / `import` | see `docs/COMMANDS.md` (export format 2) |
 
 **Blocker** (in `show`, `next --explain`): `{"code", "message", "ids"?}` with
 codes such as `STATE`, `TYPE`, `NEEDS`, `REVIEW_WAITS`, `WIP_LIMIT`,

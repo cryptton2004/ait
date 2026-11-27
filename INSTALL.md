@@ -5,17 +5,18 @@ Follow these steps in order to set up `ait` in another repository (the
 it worked. Paths below assume Windows and the folder `tools/ait/` in the
 target repo; any folder works if you use it consistently.
 
-For what each command does in detail, see [README.md](README.md). `ait help`
+For what each command does in detail, see [docs/COMMANDS.md](docs/COMMANDS.md). `ait help`
 and `ait guide` print the same information from the program.
 
 ## 1. Get the program
 
 `ait` is one file, `ait.exe`, with no installer and no runtime to install.
 
-- **Prebuilt:** copy `tools/issue-tracker/ait.exe` from the issue-tracker
-  repository. It is git-ignored there, so if it is missing, build it.
-- **Build:** from the issue-tracker repository root, run
-  `cargo build --release`. The result is `target\release\ait.exe`.
+- **Prebuilt:** download the newest `ait-…-windows-x64.zip` from the ait
+  repository's Releases page. It holds `ait.exe`, `default.cfg`, this file
+  and the docs.
+- **Build:** from the ait repository root, run `cargo build --release`.
+  The result is `target\release\ait.exe`.
 
 Check: `ait.exe version` prints `ait 0.1.0 (schema 7)` (or newer).
 
@@ -75,12 +76,12 @@ Check, from the target repo root: `tools\ait\ait.exe init` prints
 Choose one of these:
 
 - **From an inventory file** (one JSON issue per line; the format is in
-  README.md under "Inventory format"):
+  docs/COMMANDS.md under "Inventory format"):
   `tools\ait\ait.exe import --issues backlog.jsonl --prefix-for feature=EPIC,release=REL,milestone=MS`
   This needs an empty database. It checks every record first and writes
   nothing if any problem is found; the error lists every problem.
   If you made the file for an older ait, read "What changed in the inventory
-  format" in README.md: new optional fields are `criteria` and `due`, and
+  format" in docs/COMMANDS.md: new optional fields are `criteria` and `due`, and
   `labels` now become real labels. An older file still imports as it is.
 - **From an `ait export`** of another database:
   `tools\ait\ait.exe import snapshot.jsonl`
@@ -226,11 +227,11 @@ themselves as their children finish.
 Run `tools\ait\ait.exe serve` and open `http://127.0.0.1:7777/`. Agents do not
 need it. Its edits run the same commands with the same checks, and
 `serve --read-only` gives a view-only board. Stop it with Ctrl+C. See the
-"Dashboard" section in README.md.
+"Dashboard" section in docs/COMMANDS.md.
 
 To use it from another local UI (a factory UI on, say, port 5173), add
 `allowed_origins = http://localhost:5173` to `default.cfg`. The endpoints and
-JSON shapes that UI may rely on are in API.md.
+JSON shapes that UI may rely on are in docs/API.md.
 
 ## 11. Upgrading `ait`
 
@@ -256,4 +257,4 @@ JSON shapes that UI may rely on are in API.md.
 
 Every command takes `--json`. With `--json`, errors are printed as
 `{"error":{"code","message","retryable"}}`. The exit codes are listed in
-README.md; every JSON shape is in API.md.
+docs/COMMANDS.md; every JSON shape is in docs/API.md.

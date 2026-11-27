@@ -50,7 +50,7 @@ const FORBIDDEN_OPTS: &[&str] = &[
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 
-/// Version of the HTTP and `--json` contract described in API.md.
+/// Version of the HTTP and `--json` contract described in docs/API.md.
 pub const API_VERSION: i64 = 1;
 
 thread_local! {

@@ -1,6 +1,6 @@
 # Publishes a GitHub Release when a version tag is pushed:
 #   git tag v0.1.0 && git push origin v0.1.0
-# The tag must match the version in tools/issue-tracker/Cargo.toml.
+# The tag must match the version in Cargo.toml.
 # Users then download the zip from the repository's "Releases" page
 # (…/releases/latest always points at the newest one).
 name: Release
@@ -29,7 +29,7 @@ jobs:
 
       - name: Tag matches the crate version
         run: |
-          want="v$(grep -m1 '^version' tools/issue-tracker/Cargo.toml | cut -d'"' -f2)"
+          want="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           if [ "$want" != "$GITHUB_REF_NAME" ]; then
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $want" >&2
             exit 1
@@ -47,11 +47,12 @@ jobs:
       - name: Package
         run: |
           name="ait-$GITHUB_REF_NAME-windows-x64"
-          mkdir -p "dist/$name"
-          cp target/release/ait.exe "dist/$name/"
-          cp tools/issue-tracker/default.cfg tools/issue-tracker/approvals.example.json \
-             tools/issue-tracker/INSTALL.md tools/issue-tracker/README.md tools/issue-tracker/API.md \
-             tools/issue-tracker/examples/demo.jsonl LICENSE "dist/$name/"
+          # Same layout as the repository, so the links between the docs work.
+          mkdir -p "dist/$name/docs" "dist/$name/examples"
+          cp target/release/ait.exe default.cfg approvals.example.json \
+             README.md INSTALL.md LICENSE "dist/$name/"
+          cp docs/COMMANDS.md docs/API.md "dist/$name/docs/"
+          cp examples/demo.jsonl "dist/$name/examples/"
           cd dist
           7z a "$name.zip" "$name" > /dev/null
           sha256sum "$name.zip" > "$name.zip.sha256"

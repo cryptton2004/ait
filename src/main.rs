@@ -1,5 +1,5 @@
 //! `ait`: agent-first issue tracker. One binary, one local SQLite database.
-//! See tools/issue-tracker/README.md.
+//! See docs/COMMANDS.md.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(

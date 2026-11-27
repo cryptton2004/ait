@@ -14,9 +14,9 @@ It solves three problems, in this order:
 3. **Seeing progress.** `ait board`, `ait activity` and the `ait serve`
    dashboard.
 
-This README describes what is actually built.
+This page describes what is actually built, command by command.
 
-**Installing `ait` in another repository?** Follow [INSTALL.md](INSTALL.md):
+**Installing `ait` in another repository?** Follow [INSTALL.md](../INSTALL.md):
 where to copy the files, what to put in `default.cfg`, the block to add to
 that repo's AGENTS.md, and a smoke test.
 
@@ -24,14 +24,13 @@ that repo's AGENTS.md, and a smoke test.
 
 ```
 cargo build --release
-copy target\release\ait.exe tools\issue-tracker\ait.exe
 ```
 
 You need Rust (stable, MSVC) and the Visual Studio C++ build tools. The
 libraries are pinned by `Cargo.lock` and downloaded by the first build. To
 build offline later, run `cargo vendor` once and follow what it prints
 (the `vendor/` folder and `.cargo/config.toml` are git-ignored).
-`ait.exe` is git-ignored: build it, don't commit it.
+The result is `target\release\ait.exe`; never commit an `ait.exe`.
 
 ## Setup
 

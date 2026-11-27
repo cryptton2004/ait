@@ -6,7 +6,7 @@ always answers in JSON; you watch and steer from a live local dashboard. The
 data is a SQLite file inside your repository's `.git` folder: no server, no
 account, nothing leaves your machine.
 
-![The ait board: overview panels with the flow chart, and the kanban columns](tools/issue-tracker/docs/screenshots/board.png)
+![The ait board: overview panels with the flow chart, and the kanban columns](docs/screenshots/board.png)
 
 ## Why not just GitHub Issues?
 
@@ -58,12 +58,12 @@ where the last session stopped.
 | Quality gates | Acceptance criteria with evidence, review issues, WIP limits per column and per agent tier, owner approvals |
 | Releases | Roll-up progress for features, milestones and releases; `ait ship` checks every member is done and merged |
 | Dashboard | Kanban board with drag and drop, list view with search, filters and bulk changes, releases view with expected dates, roadmap, flow statistics (table or chart), activity feed |
-| Integration | Versioned HTTP API and live event stream for your own UI ([API.md](tools/issue-tracker/API.md)), CORS for local origins |
+| Integration | Versioned HTTP API and live event stream for your own UI ([API.md](docs/API.md)), CORS for local origins |
 | Data safety | Database in `.git/ait/` (shared by worktrees, never committed), daily backups, readable export/import with a byte-for-byte round trip, `ait check` |
 
 | List view | Releases view |
 |---|---|
-| ![List view](tools/issue-tracker/docs/screenshots/list.png) | ![Releases view](tools/issue-tracker/docs/screenshots/releases.png) |
+| ![List view](docs/screenshots/list.png) | ![Releases view](docs/screenshots/releases.png) |
 
 ## Quick start
 
@@ -82,13 +82,13 @@ tools\ait\ait.exe serve
 
 Open <http://127.0.0.1:7777/>. Add `tools/ait/ait.exe` to `.gitignore`.
 
-Want something to look at first? The zip also holds `demo.jsonl`, a made-up
+Want something to look at first? The zip also holds `examples\demo.jsonl`, a made-up
 backlog of 100 issues. Import it into a scratch database, from the unzipped
 folder:
 
 ```
 ait --db demo.db init
-ait --db demo.db import --issues demo.jsonl
+ait --db demo.db import --issues examples\demo.jsonl
 ait --db demo.db serve
 ```
 
@@ -98,7 +98,7 @@ platforms can build from source (see below); only Windows is tested today.
 
 ## Installing it for your agents
 
-[INSTALL.md](tools/issue-tracker/INSTALL.md) is written for an agent to
+[INSTALL.md](INSTALL.md) is written for an agent to
 follow step by step: copy the two files, set the id prefixes in
 `default.cfg`, load an existing backlog, and paste the agent block into the
 repository's `AGENTS.md`. A prompt like this is enough:
@@ -140,7 +140,7 @@ Everything is one SQLite database in WAL mode; every write is a short
    add instructions), or run `ait guide` to see the current workflow.
 
 Release notes are on the [Releases page](../../releases); the API changelog is
-at the end of [API.md](tools/issue-tracker/API.md).
+at the end of [API.md](docs/API.md).
 
 ## Limitations
 
@@ -153,9 +153,9 @@ at the end of [API.md](tools/issue-tracker/API.md).
 
 | You want to | Read |
 |---|---|
-| Install it in a repository | [INSTALL.md](tools/issue-tracker/INSTALL.md) |
-| Every command, the dashboard, import/export | [tools/issue-tracker/README.md](tools/issue-tracker/README.md) |
-| Build a UI on top (HTTP + JSON contract) | [API.md](tools/issue-tracker/API.md) |
+| Install it in a repository | [INSTALL.md](INSTALL.md) |
+| Every command, the dashboard, import/export | [docs/COMMANDS.md](docs/COMMANDS.md) |
+| Build a UI on top (HTTP + JSON contract) | [docs/API.md](docs/API.md) |
 | Work on the code | [AGENTS.md](AGENTS.md) |
 
 ## Building from source and contributing
@@ -179,7 +179,7 @@ The code is written and maintained by AI agents under the rules in
 every command and fix, and no new dependencies without approval.
 
 Releases are published by pushing a version tag that matches
-`tools/issue-tracker/Cargo.toml` (`git tag v0.1.0 && git push origin v0.1.0`).
+`Cargo.toml` (`git tag v0.1.0 && git push origin v0.1.0`).
 
 ## License
 

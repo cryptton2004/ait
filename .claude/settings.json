@@ -34,8 +34,8 @@
       "Edit(**/Cargo.toml)",
       "Edit(AGENTS.md)",
       "Edit(CLAUDE.md)",
-      "Edit(tools/issue-tracker/approvals.json)",
-      "Write(tools/issue-tracker/approvals.json)",
+      "Edit(approvals.json)",
+      "Write(approvals.json)",
       "Edit(.claude/**)"
     ],
     "deny": [

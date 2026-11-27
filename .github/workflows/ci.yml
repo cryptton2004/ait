@@ -50,5 +50,5 @@ jobs:
           name: ait-windows-x64
           path: |
             target/release/ait.exe
-            tools/issue-tracker/default.cfg
+            default.cfg
           retention-days: 30

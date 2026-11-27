@@ -5,7 +5,7 @@
 //! Both imports validate everything inside one transaction and write nothing
 //! if any problem is found; every problem is listed in the error.
 //! `ait import --issues <file>` loads a simple one-issue-per-line inventory
-//! (the shape documented in README.md) instead of an export.
+//! (the shape documented in docs/COMMANDS.md) instead of an export.
 
 use crate::args::Args;
 use crate::check::{self, Checks};
