@@ -10,14 +10,31 @@
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #e3e6ec;
   --accent: #2f6fde; --ok: #1f8a4c; --warn: #b26b00; --bad: #c4372f; --chip: #eef1f6;
+  --scroll: #c5cad3; --scroll-hover: #a3abb8;
+  color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #98a2b3; --line: #2a313d;
     --accent: #6b9cff; --ok: #4cc38a; --warn: #f0b45a; --bad: #ff7b72; --chip: #252c38;
+    --scroll: #343c4a; --scroll-hover: #4a5466;
+    color-scheme: dark;
   }
 }
 * { box-sizing: border-box; }
+/* Scroll bars follow the theme: slim, rounded thumb on a transparent track.
+   Chrome/Edge/Safari use the ::-webkit-scrollbar rules (no arrow buttons);
+   Firefox, which has no such rules, gets scrollbar-color/scrollbar-width.
+   The standard properties are kept to Firefox because in Chrome 121+ they
+   switch the ::-webkit-scrollbar rules off and bring the arrows back. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-hover); }
+::-webkit-scrollbar-button { display: none; }
+@supports (-moz-appearance: none) {
+  * { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
+}
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
