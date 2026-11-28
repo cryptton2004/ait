@@ -16,7 +16,12 @@ and `ait guide` print the same information from the program.
   repository's Releases page. It holds `ait.exe`, `default.cfg`, this file
   and the docs.
 - **Build:** from the ait repository root, run `cargo build --release`.
-  The result is `target\release\ait.exe`.
+  The result is `target\release\ait.exe`. On Windows, `.\build.ps1` does the
+  same with half the CPU cores, copies `ait.exe` to the repository root
+  (git-ignored), and takes `-Gate` (run fmt, clippy and tests first) and
+  `-Dest <path>` (also copy it, e.g. to a project's `tools\ait\ait.exe`).
+  The dashboard is built into `ait.exe`: after pulling a dashboard change,
+  rebuild and restart `ait serve`.
 
 Check: `ait.exe version` prints `ait 0.1.0 (schema 8, local)` (or newer).
 
